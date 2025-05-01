@@ -12,20 +12,22 @@ email=luandro@awana.digital
 
 about=Generates SMP maps compatible with CoMapeo
 
-tracker=http://bugs
-repository=http://repo
+tracker=https://github.com/digidem/qgis-smp-plugin/issues
+repository=https://github.com/digidem/qgis-smp-plugin
 # End of mandatory metadata
 
 # Recommended items:
 
 hasProcessingProvider=yes
-# Uncomment the following line and add your changelog:
-# changelog=
+changelog=
+    0.1 - Initial release
+    * Basic SMP file generation from QGIS map canvas
+    * Support for custom extent and zoom levels
 
 # Tags are comma separated with spaces allowed
-tags=python
+tags=python, maplibre, vector tiles, offline, comapeo
 
-homepage=http://awana.digital
+homepage=https://github.com/digidem/qgis-smp-plugin
 category=Analysis
 icon=icon.png
 # experimental flag
