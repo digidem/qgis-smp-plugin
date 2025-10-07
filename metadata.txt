@@ -5,12 +5,12 @@
 [general]
 name=CoMapeo Map Builder
 qgisMinimumVersion=3.0
-description=Generates SMP files for CoMapeo
-version=0.1
+description=Generates SMP files for CoMapeo using proper XYZ Web Mercator tiling
+version=0.2.0
 author=Awana Digital
 email=luandro@awana.digital
 
-about=Generates SMP maps compatible with CoMapeo
+about=Generates XYZ-compliant SMP (Styled Map Package) files for CoMapeo. Uses proper Web Mercator projection and standard tiling scheme compatible with OpenStreetMap, MapLibre, and other mapping systems.
 
 tracker=https://github.com/digidem/qgis-smp-plugin/issues
 repository=https://github.com/digidem/qgis-smp-plugin
@@ -20,6 +20,15 @@ repository=https://github.com/digidem/qgis-smp-plugin
 
 hasProcessingProvider=yes
 changelog=
+    0.2.0 - Major compatibility fix
+    * BREAKING: Implement proper Web Mercator XYZ tiling (was using incorrect formula)
+    * Add lat/lon to tile coordinate conversion functions
+    * Fix tile extent calculation to align with global XYZ grid
+    * Only generate tiles intersecting user's extent (was generating all tiles)
+    * Fix progress tracking to show overall progress
+    * Add automatic temp directory cleanup on errors
+    * Align style.json with reference implementation
+    * Add comprehensive documentation (XYZ_SMP.md, CLAUDE.md)
     0.1 - Initial release
     * Basic SMP file generation from QGIS map canvas
     * Support for custom extent and zoom levels
