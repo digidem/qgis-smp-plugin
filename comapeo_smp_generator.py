@@ -2,6 +2,8 @@
 
 import os
 import json
+import math
+import shutil
 import zipfile
 import tempfile
 from qgis.core import (
@@ -43,6 +45,38 @@ class SMPGenerator:
         if self.feedback:
             self.feedback.pushInfo(message)
         QgsMessageLog.logMessage(message, 'CoMapeo SMP Generator', level)
+
+    def _deg2num(self, lat_deg, lon_deg, zoom):
+        """
+        Convert latitude/longitude to tile coordinates at given zoom level
+        Based on OpenStreetMap slippy map tilenames standard
+
+        :param lat_deg: Latitude in degrees
+        :param lon_deg: Longitude in degrees
+        :param zoom: Zoom level
+        :return: Tuple of (xtile, ytile)
+        """
+        lat_rad = math.radians(lat_deg)
+        n = 1 << zoom  # 2^zoom
+        xtile = int((lon_deg + 180.0) / 360.0 * n)
+        ytile = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
+        return xtile, ytile
+
+    def _num2deg(self, xtile, ytile, zoom):
+        """
+        Convert tile coordinates to latitude/longitude (NW corner of tile)
+        Based on OpenStreetMap slippy map tilenames standard
+
+        :param xtile: Tile X coordinate
+        :param ytile: Tile Y coordinate
+        :param zoom: Zoom level
+        :return: Tuple of (lat_deg, lon_deg) for NW corner
+        """
+        n = 1 << zoom  # 2^zoom
+        lon_deg = xtile / n * 360.0 - 180.0
+        lat_rad = math.atan(math.sinh(math.pi * (1 - 2 * ytile / n)))
+        lat_deg = math.degrees(lat_rad)
+        return lat_deg, lon_deg
 
     def generate_smp_from_canvas(self, extent, min_zoom, max_zoom, output_path):
         """
@@ -89,6 +123,11 @@ class SMPGenerator:
         except Exception as e:
             self.log(f"Error generating SMP file: {str(e)}", Qgis.Critical)
             raise
+        finally:
+            # Always clean up temporary directory
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+                self.log(f"Cleaned up temporary directory: {temp_dir}")
 
     def _create_style_from_canvas(self, extent, min_zoom, max_zoom):
         """
@@ -102,24 +141,29 @@ class SMPGenerator:
         # Get the layer bounds in WGS84
         bounds = self._get_bounds_wgs84(extent)
 
-        # Create a basic style following the example schema
+        # Calculate center from bounds
+        center_lon = (bounds[0] + bounds[2]) / 2
+        center_lat = (bounds[1] + bounds[3]) / 2
+
+        # Calculate appropriate default zoom
+        default_zoom = min(max_zoom - 2, 11)
+
+        # Create a basic style following the bash script reference
         source_id = "mbtiles-source"
         style = {
             "version": 8,
             "name": "QGIS MAP",
             "sources": {
                 source_id: {
-                    "name": "QGIS Map",
                     "format": "png",
+                    "name": "QGIS Map",
+                    "version": "2.0",
+                    "type": "raster",
                     "minzoom": min_zoom,
                     "maxzoom": max_zoom,
-                    "type": "raster",
-                    "description": "Tiles generated from QGIS",
-                    "version": "1.0.0",
-                    "attribution": "© QGIS",
                     "scheme": "xyz",
                     "bounds": bounds,
-                    "center": [0, 0, 8],
+                    "center": [0, 0, 6],
                     "tiles": [
                         "smp://maps.v1/s/0/{z}/{x}/{y}.png"
                     ]
@@ -146,14 +190,11 @@ class SMPGenerator:
                 "smp:bounds": bounds,
                 "smp:maxzoom": max_zoom,
                 "smp:sourceFolders": {
-                    source_id: "0"  # Encoded source ID
+                    source_id: "0"
                 }
             },
-            "center": [
-                (bounds[0] + bounds[2]) / 2,
-                (bounds[1] + bounds[3]) / 2
-            ],
-            "zoom": min(max_zoom - 2, 14)  # Default zoom level
+            "center": [center_lon, center_lat],
+            "zoom": default_zoom
         }
 
         return style
@@ -200,37 +241,43 @@ class SMPGenerator:
         # Create map settings for rendering
         map_settings = QgsMapSettings()
         map_settings.setDestinationCrs(project.crs())
-        map_settings.setExtent(extent)
 
         # Add all visible layers from the project
         layers = project.mapLayers().values()
         visible_layers = [layer for layer in layers if project.layerTreeRoot().findLayer(layer.id()).isVisible()]
         map_settings.setLayers(visible_layers)
 
-        # For each zoom level
+        # Calculate total tiles across all zoom levels for progress tracking
         total_tiles = 0
+        tiles_by_zoom = []
         for zoom in range(min_zoom, max_zoom + 1):
+            min_x, max_x, min_y, max_y = self._calculate_tiles_at_zoom(extent, zoom)
+            num_tiles = (max_x - min_x + 1) * (max_y - min_y + 1)
+            tiles_by_zoom.append((zoom, min_x, max_x, min_y, max_y, num_tiles))
+            total_tiles += num_tiles
+
+        self.log(f"Total tiles to generate: {total_tiles}")
+
+        # Set the tile size
+        tile_size = 256
+        map_settings.setOutputSize(QSize(tile_size, tile_size))
+
+        # Generate tiles with cumulative progress
+        tiles_completed = 0
+        for zoom, min_x, max_x, min_y, max_y, num_tiles in tiles_by_zoom:
             zoom_dir = os.path.join(tiles_dir, str(zoom))
             os.makedirs(zoom_dir, exist_ok=True)
 
-            # Calculate the number of tiles at this zoom level
-            num_tiles_x, num_tiles_y = self._calculate_tiles_at_zoom(extent, zoom)
-            total_tiles += num_tiles_x * num_tiles_y
+            self.log(f"Zoom level {zoom}: {num_tiles} tiles ({max_x - min_x + 1}x{max_y - min_y + 1})")
 
-            self.log(f"Zoom level {zoom}: {num_tiles_x}x{num_tiles_y} tiles")
-
-            # Set the tile size
-            tile_size = 256
-            map_settings.setOutputSize(QSize(tile_size, tile_size))
-
-            # Generate tiles
-            for x in range(num_tiles_x):
+            # Generate tiles for this zoom level
+            for x in range(min_x, max_x + 1):
                 x_dir = os.path.join(zoom_dir, str(x))
                 os.makedirs(x_dir, exist_ok=True)
 
-                for y in range(num_tiles_y):
-                    # Calculate the tile extent
-                    tile_extent = self._calculate_tile_extent(extent, zoom, x, y, num_tiles_x, num_tiles_y)
+                for y in range(min_y, max_y + 1):
+                    # Calculate the tile extent using proper XYZ bounds
+                    tile_extent = self._calculate_tile_extent(x, y, zoom)
                     map_settings.setExtent(tile_extent)
 
                     # Render the tile
@@ -247,57 +294,68 @@ class SMPGenerator:
                     tile_path = os.path.join(x_dir, f"{y}.png")
                     img.save(tile_path, "PNG")
 
-                    # Update progress
+                    tiles_completed += 1
+
+                    # Update overall progress
                     if self.feedback:
-                        progress = (x * num_tiles_y + y) / (num_tiles_x * num_tiles_y) * 100
+                        progress = (tiles_completed / total_tiles) * 100
                         self.feedback.setProgress(progress)
 
-        self.log(f"Generated {total_tiles} tiles from map canvas")
+        self.log(f"Generated {tiles_completed} tiles from map canvas")
 
-    def _calculate_tile_extent(self, full_extent, zoom, x, y, num_tiles_x, num_tiles_y):
+    def _calculate_tile_extent(self, xtile, ytile, zoom):
         """
-        Calculate the extent of a specific tile
+        Calculate the geographic extent of a specific tile using proper XYZ bounds
 
-        :param full_extent: Full extent to export
-        :param zoom: Zoom level (not used in this implementation)
-        :param x: Tile X coordinate
-        :param y: Tile Y coordinate
-        :param num_tiles_x: Number of tiles in X direction
-        :param num_tiles_y: Number of tiles in Y direction
-        :return: Extent of the tile
+        :param xtile: Tile X coordinate
+        :param ytile: Tile Y coordinate
+        :param zoom: Zoom level
+        :return: QgsRectangle in project CRS
         """
-        # Calculate the width and height of each tile
-        width = full_extent.width() / num_tiles_x
-        height = full_extent.height() / num_tiles_y
+        # Get WGS84 bounds for this tile (NW corner)
+        north, west = self._num2deg(xtile, ytile, zoom)
+        # Get SE corner (next tile's NW corner)
+        south, east = self._num2deg(xtile + 1, ytile + 1, zoom)
 
-        # Calculate the coordinates of the tile
-        xmin = full_extent.xMinimum() + x * width
-        ymin = full_extent.yMinimum() + y * height
-        xmax = xmin + width
-        ymax = ymin + height
+        # Create rectangle in WGS84
+        wgs84_rect = QgsRectangle(west, south, east, north)
 
-        return QgsRectangle(xmin, ymin, xmax, ymax)
+        # Transform to project CRS
+        wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
+        project_crs = QgsProject.instance().crs()
+        transform = QgsCoordinateTransform(wgs84, project_crs, QgsProject.instance())
+
+        return transform.transformBoundingBox(wgs84_rect)
 
     def _calculate_tiles_at_zoom(self, extent, zoom):
         """
-        Calculate the number of tiles needed at a specific zoom level
+        Calculate tile range that intersects with the given extent using proper XYZ tiling
 
-        :param extent: Extent to export (not used in this implementation)
+        :param extent: QgsRectangle extent to export
         :param zoom: Zoom level
-        :return: Tuple of (num_tiles_x, num_tiles_y)
+        :return: Tuple of (min_x, max_x, min_y, max_y) tile coordinates
         """
-        # Calculate the number of tiles based on the zoom level
-        # At zoom level 0, the world is covered by a single tile
-        # Each zoom level quadruples the number of tiles
+        # Convert extent to WGS84
+        bounds = self._get_bounds_wgs84(extent)
+        west, south, east, north = bounds
 
-        # For a more realistic implementation, we would calculate the actual
-        # tile coordinates based on the extent and zoom level using
-        # Web Mercator projection formulas
+        # Clamp latitude to Web Mercator limits (±85.0511 degrees)
+        north = min(85.0511, max(-85.0511, north))
+        south = min(85.0511, max(-85.0511, south))
 
-        # For simplicity, we'll use a formula that increases the number of tiles
-        # with the zoom level, but keeps it manageable for testing
-        tiles_per_side = 2 ** max(0, zoom - 8)
-        return max(1, tiles_per_side), max(1, tiles_per_side)
+        # Get tile coordinates for corners
+        # Note: Y increases from north (0) to south, so northern lat = smaller Y value
+        min_x, min_y = self._deg2num(north, west, zoom)
+        max_x, max_y = self._deg2num(south, east, zoom)
+
+        # Ensure valid range
+        n = 1 << zoom  # 2^zoom
+        min_x = max(0, min(n - 1, min_x))
+        max_x = max(0, min(n - 1, max_x))
+        min_y = max(0, min(n - 1, min_y))
+        max_y = max(0, min(n - 1, max_y))
+
+        return min_x, max_x, min_y, max_y
 
     def _create_smp_archive(self, source_dir, output_path):
         """
