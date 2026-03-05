@@ -345,7 +345,7 @@ class TestValidateDiskSpace(unittest.TestCase):
         """When estimated size > free space, OSError should be raised."""
         # Mock shutil.disk_usage to return very little free space
         import comapeo_smp_generator as _mod
-        original = _mod._shutil.disk_usage
+        original = _mod.shutil.disk_usage
 
         class _FakeDiskUsage:
             free = 1  # 1 byte only
@@ -353,11 +353,11 @@ class TestValidateDiskSpace(unittest.TestCase):
             used = 99
 
         try:
-            _mod._shutil.disk_usage = MagicMock(return_value=_FakeDiskUsage())
+            _mod.shutil.disk_usage = MagicMock(return_value=_FakeDiskUsage())
             with self.assertRaises(OSError):
                 self.gen.validate_disk_space(self.output_path, 100, SMPGenerator.TILE_FORMAT_PNG)
         finally:
-            _mod._shutil.disk_usage = original
+            _mod.shutil.disk_usage = original
 
     def test_png_uses_larger_estimate(self):
         """PNG byte estimate should be larger than JPG."""
@@ -584,6 +584,7 @@ class TestProgressSmoothing(unittest.TestCase):
         """With many tiles at same pct, setProgress should be called fewer times than tile count."""
         gen = SMPGenerator()
         feedback = MagicMock()
+        feedback.isCanceled.return_value = False
         gen.feedback = feedback
 
         # Patch rendering so no actual QGIS calls happen
@@ -615,6 +616,40 @@ class TestProgressSmoothing(unittest.TestCase):
         self.assertLessEqual(call_count, 101)
         # Should be called at least once
         self.assertGreaterEqual(call_count, 1)
+
+    def test_cancellation_stops_tile_generation(self):
+        """When feedback.isCanceled() returns True, the loop breaks early."""
+        gen = SMPGenerator()
+        feedback = MagicMock()
+        feedback.isCanceled.return_value = True
+        gen.feedback = feedback
+
+        gen._calculate_tiles_at_zoom = MagicMock(return_value=(0, 9, 0, 9))  # 100 tiles
+        gen._calculate_tile_extent = MagicMock(return_value=MagicMock())
+
+        import comapeo_smp_generator as _mod
+        fake_img = MagicMock()
+        fake_img.save = MagicMock()
+
+        with patch.object(_mod, 'QgsMapSettings', MagicMock()), \
+             patch.object(_mod, 'QgsProject', _FakeProject), \
+             patch('comapeo_smp_generator.QImage', return_value=fake_img), \
+             patch('comapeo_smp_generator.QPainter', MagicMock()), \
+             patch('comapeo_smp_generator.QgsMapRendererCustomPainterJob', MagicMock()):
+
+            tmp = tempfile.mkdtemp()
+            try:
+                gen._generate_tiles_from_canvas(
+                    _FakeRectangle(0, 0, 1, 1), 0, 0, tmp, tile_format='PNG',
+                    max_workers=1
+                )
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+
+        # isCanceled must have been called at least once
+        feedback.isCanceled.assert_called()
+        # With immediate cancellation, far fewer than 100 setProgress calls expected
+        self.assertLess(feedback.setProgress.call_count, 100)
 
 
 class TestParallelTileRendering(unittest.TestCase):
@@ -956,6 +991,17 @@ class TestSMPArchiveStructure(unittest.TestCase):
         self.assertGreater(len(tile_entries), 0)
         for entry in tile_entries:
             self.assertRegex(entry, pattern, f"Tile path {entry!r} does not match expected pattern")
+
+    def test_smp_archive_no_backslashes(self):
+        """ZIP archive entries must use forward slashes on all platforms (POSIX paths)."""
+        import zipfile
+        smp = self._build_minimal_smp()
+        with zipfile.ZipFile(smp) as zf:
+            for info in zf.infolist():
+                self.assertNotIn(
+                    '\\', info.filename,
+                    f"ZIP entry {info.filename!r} contains a backslash; must use POSIX separators"
+                )
 
 
 class TestErrorHandling(unittest.TestCase):

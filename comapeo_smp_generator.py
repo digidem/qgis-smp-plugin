@@ -7,7 +7,6 @@ import threading
 import shutil
 import zipfile
 import tempfile
-import shutil as _shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from qgis.core import (
     QgsProject,
@@ -272,7 +271,7 @@ class SMPGenerator:
         estimated_mb = estimated_bytes / (1024 * 1024)
 
         output_dir = os.path.dirname(os.path.abspath(output_path)) or '.'
-        disk_usage = _shutil.disk_usage(output_dir)
+        disk_usage = shutil.disk_usage(output_dir)
         free_bytes = disk_usage.free
 
         self.log(
@@ -686,6 +685,8 @@ class SMPGenerator:
                 future.result()
                 with lock:
                     tiles_completed += 1
+                    if self.feedback and self.feedback.isCanceled():
+                        break
                     if self.feedback and total_tiles > 0:
                         new_pct = int((tiles_completed / total_tiles) * 100)
                         if new_pct != last_reported_pct:
@@ -709,7 +710,7 @@ class SMPGenerator:
                 for file in files:
                     fp = os.path.join(root, file)
                     rel = os.path.relpath(fp, tiles_dir)
-                    zipf.write(fp, os.path.join('s', '0', rel))
+                    zipf.write(fp, 's/0/' + rel.replace(os.sep, '/'))
 
     def _calculate_tile_extent(self, xtile, ytile, zoom):
         """

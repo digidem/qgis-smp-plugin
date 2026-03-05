@@ -37,10 +37,7 @@ from qgis.core import (QgsProcessingAlgorithm,
                        QgsProcessingParameterEnum,
                        QgsProcessingParameterFileDestination,
                        QgsProcessingException,
-                       QgsRectangle,
-                       QgsProject,
-                       QgsMapSettings,
-                       QgsMapRendererCustomPainterJob)
+                       QgsRectangle)
 
 from .comapeo_smp_generator import SMPGenerator
 
