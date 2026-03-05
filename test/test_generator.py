@@ -511,7 +511,7 @@ class TestCalculateTilesAtZoom(unittest.TestCase):
 
     def test_whole_world_zoom0(self):
         extent = self._make_extent(-180, -85, 180, 85)
-        min_x, max_x, min_y, max_y = self.gen._calculate_tiles_at_zoom(extent, 0)
+        min_x, max_x, min_y, max_y = self.gen._calculate_tiles_at_zoom(extent, 0)[0]
         self.assertEqual(min_x, 0)
         self.assertEqual(max_x, 0)
         self.assertEqual(min_y, 0)
@@ -520,7 +520,7 @@ class TestCalculateTilesAtZoom(unittest.TestCase):
     def test_tile_range_non_negative(self):
         extent = self._make_extent(0, 0, 10, 10)
         for zoom in range(0, 8):
-            min_x, max_x, min_y, max_y = self.gen._calculate_tiles_at_zoom(extent, zoom)
+            min_x, max_x, min_y, max_y = self.gen._calculate_tiles_at_zoom(extent, zoom)[0]
             self.assertGreaterEqual(min_x, 0)
             self.assertGreaterEqual(min_y, 0)
             self.assertGreaterEqual(max_x, min_x)
@@ -531,9 +531,43 @@ class TestCalculateTilesAtZoom(unittest.TestCase):
         extent = self._make_extent(-180, -85, 180, 85)
         zoom = 4
         n = 1 << zoom
-        min_x, max_x, min_y, max_y = self.gen._calculate_tiles_at_zoom(extent, zoom)
+        min_x, max_x, min_y, max_y = self.gen._calculate_tiles_at_zoom(extent, zoom)[0]
         self.assertLessEqual(max_x, n - 1)
         self.assertLessEqual(max_y, n - 1)
+
+    def test_normal_extent_returns_single_range(self):
+        """Non-antimeridian extent returns exactly one range."""
+        extent = self._make_extent(-10, -10, 10, 10)
+        ranges = self.gen._calculate_tiles_at_zoom(extent, 4)
+        self.assertEqual(len(ranges), 1)
+
+    def test_antimeridian_extent_returns_two_ranges(self):
+        """Extent crossing the antimeridian (west > east) returns two ranges."""
+        extent = self._make_extent(170, -10, -170, 10)  # west > east
+        zoom = 4
+        n = 1 << zoom
+        ranges = self.gen._calculate_tiles_at_zoom(extent, zoom)
+        self.assertEqual(len(ranges), 2)
+        min_x1, max_x1, min_y1, max_y1 = ranges[0]
+        min_x2, max_x2, min_y2, max_y2 = ranges[1]
+        # First range: west side to right edge
+        self.assertEqual(max_x1, n - 1)
+        # Second range: left edge to east side
+        self.assertEqual(min_x2, 0)
+        # Y ranges must be identical
+        self.assertEqual(min_y1, min_y2)
+        self.assertEqual(max_y1, max_y2)
+        # All coords within grid
+        for r in ranges:
+            for v in r:
+                self.assertGreaterEqual(v, 0)
+                self.assertLessEqual(v, n - 1)
+
+    def test_antimeridian_tile_count_greater_than_zero(self):
+        """estimate_tile_count should work correctly for antimeridian extents."""
+        extent = self._make_extent(170, -10, -170, 10)
+        count = self.gen.estimate_tile_count(extent, 4, 4)
+        self.assertGreater(count, 0)
 
 
 class TestProgressSmoothing(unittest.TestCase):
@@ -547,7 +581,7 @@ class TestProgressSmoothing(unittest.TestCase):
         gen.feedback = feedback
 
         # Patch rendering so no actual QGIS calls happen
-        gen._calculate_tiles_at_zoom = MagicMock(return_value=(0, 9, 0, 9))  # 100 tiles
+        gen._calculate_tiles_at_zoom = MagicMock(return_value=[(0, 9, 0, 9)])  # 100 tiles
         gen._calculate_tile_extent = MagicMock(return_value=MagicMock())
 
         import comapeo_smp_generator as _mod
@@ -583,7 +617,7 @@ class TestProgressSmoothing(unittest.TestCase):
         feedback.isCanceled.return_value = True
         gen.feedback = feedback
 
-        gen._calculate_tiles_at_zoom = MagicMock(return_value=(0, 9, 0, 9))  # 100 tiles
+        gen._calculate_tiles_at_zoom = MagicMock(return_value=[(0, 9, 0, 9)])  # 100 tiles
         gen._calculate_tile_extent = MagicMock(return_value=MagicMock())
 
         import comapeo_smp_generator as _mod
@@ -617,7 +651,7 @@ class TestParallelTileRendering(unittest.TestCase):
     def test_parallel_produces_tile_files(self):
         gen = SMPGenerator()
         gen._get_bounds_wgs84 = MagicMock(return_value=[-1, -1, 1, 1])
-        gen._calculate_tiles_at_zoom = MagicMock(return_value=(0, 1, 0, 1))  # 4 tiles
+        gen._calculate_tiles_at_zoom = MagicMock(return_value=[(0, 1, 0, 1)])  # 4 tiles
         gen._calculate_tile_extent = MagicMock(return_value=MagicMock())
 
         import comapeo_smp_generator as _mod
@@ -694,7 +728,7 @@ class TestCacheDirectory(unittest.TestCase):
         """Tiles already on disk are not re-rendered when resume=True."""
         gen = SMPGenerator()
         gen._get_bounds_wgs84 = MagicMock(return_value=[-1, -1, 1, 1])
-        gen._calculate_tiles_at_zoom = MagicMock(return_value=(0, 0, 0, 0))  # 1 tile
+        gen._calculate_tiles_at_zoom = MagicMock(return_value=[(0, 0, 0, 0)])  # 1 tile
         gen._calculate_tile_extent = MagicMock(return_value=MagicMock())
 
         tmp = tempfile.mkdtemp()

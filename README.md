@@ -49,6 +49,8 @@ A Styled Map Package (`.smp`) file is a Zip archive containing all the resources
    - **Extent**: The geographic area to include in the SMP file
    - **Minimum zoom level**: The minimum zoom level to include (0-24)
    - **Maximum zoom level**: The maximum zoom level to include (0-24)
+   - **Tile image format**: PNG or JPG format for the generated tiles
+   - **JPEG quality**: Compression quality for JPG tiles (1-100)
    - **Output SMP file**: The location to save the SMP file
 6. Click "Run" to generate the SMP file
 

@@ -159,8 +159,9 @@ class SMPGenerator:
         """
         total = 0
         for zoom in range(min_zoom, max_zoom + 1):
-            min_x, max_x, min_y, max_y = self._calculate_tiles_at_zoom(extent, zoom)
-            total += (max_x - min_x + 1) * (max_y - min_y + 1)
+            ranges = self._calculate_tiles_at_zoom(extent, zoom)
+            for min_x, max_x, min_y, max_y in ranges:
+                total += (max_x - min_x + 1) * (max_y - min_y + 1)
         return total
 
     def validate_tile_count(self, extent, min_zoom, max_zoom):
@@ -264,20 +265,21 @@ class SMPGenerator:
         """
         rects = []
         for zoom in range(min_zoom, max_zoom + 1):
-            min_x, max_x, min_y, max_y = self._calculate_tiles_at_zoom(extent, zoom)
-            for x in range(min_x, max_x + 1):
-                for y in range(min_y, max_y + 1):
-                    north, west = self._num2deg(x, y, zoom)
-                    south, east = self._num2deg(x + 1, y + 1, zoom)
-                    rects.append({
-                        "zoom": zoom,
-                        "x": x,
-                        "y": y,
-                        "west": west,
-                        "south": south,
-                        "east": east,
-                        "north": north
-                    })
+            ranges = self._calculate_tiles_at_zoom(extent, zoom)
+            for min_x, max_x, min_y, max_y in ranges:
+                for x in range(min_x, max_x + 1):
+                    for y in range(min_y, max_y + 1):
+                        north, west = self._num2deg(x, y, zoom)
+                        south, east = self._num2deg(x + 1, y + 1, zoom)
+                        rects.append({
+                            "zoom": zoom,
+                            "x": x,
+                            "y": y,
+                            "west": west,
+                            "south": south,
+                            "east": east,
+                            "north": north
+                        })
         return rects
 
     def generate_smp_from_canvas(self, extent, min_zoom, max_zoom, output_path,
@@ -579,10 +581,11 @@ class SMPGenerator:
         total_tiles = 0
         tiles_by_zoom = []
         for zoom in range(min_zoom, max_zoom + 1):
-            min_x, max_x, min_y, max_y = self._calculate_tiles_at_zoom(extent, zoom)
-            num_tiles = (max_x - min_x + 1) * (max_y - min_y + 1)
-            tiles_by_zoom.append((zoom, min_x, max_x, min_y, max_y, num_tiles))
-            total_tiles += num_tiles
+            ranges = self._calculate_tiles_at_zoom(extent, zoom)
+            for min_x, max_x, min_y, max_y in ranges:
+                num_tiles = (max_x - min_x + 1) * (max_y - min_y + 1)
+                tiles_by_zoom.append((zoom, min_x, max_x, min_y, max_y, num_tiles))
+                total_tiles += num_tiles
 
         self.log(f"Total tiles to generate: {total_tiles}")
 
@@ -608,6 +611,9 @@ class SMPGenerator:
         lock = threading.Lock()
         effective_workers = max_workers if max_workers is not None else os.cpu_count() or 1
 
+        if self.feedback and total_tiles > 0:
+            self.feedback.setProgress(0)
+
         with ThreadPoolExecutor(max_workers=effective_workers) as executor:
             futures = {
                 executor.submit(
@@ -630,6 +636,9 @@ class SMPGenerator:
                         if new_pct != last_reported_pct:
                             self.feedback.setProgress(new_pct)
                             last_reported_pct = new_pct
+
+        if self.feedback and not self.feedback.isCanceled() and total_tiles > 0:
+            self.feedback.setProgress(100)
 
         self.log(f"Generated {tiles_completed} tiles from map canvas")
 
@@ -676,11 +685,12 @@ class SMPGenerator:
 
     def _calculate_tiles_at_zoom(self, extent, zoom):
         """
-        Calculate tile range that intersects with the given extent using proper XYZ tiling
+        Calculate tile ranges that intersect with the given extent using proper XYZ tiling.
+        Handles antimeridian crossing by returning multiple ranges if necessary.
 
         :param extent: QgsRectangle extent to export
         :param zoom: Zoom level
-        :return: Tuple of (min_x, max_x, min_y, max_y) tile coordinates
+        :return: List of tuples (min_x, max_x, min_y, max_y) tile coordinates
         """
         # Convert extent to WGS84
         bounds = self._get_bounds_wgs84(extent)
@@ -690,16 +700,34 @@ class SMPGenerator:
         north = min(85.0511, max(-85.0511, north))
         south = min(85.0511, max(-85.0511, south))
 
-        # Get tile coordinates for corners
-        # Note: Y increases from north (0) to south, so northern lat = smaller Y value
-        min_x, min_y = self._deg2num(north, west, zoom)
-        max_x, max_y = self._deg2num(south, east, zoom)
-
-        # Ensure valid range
         n = 1 << zoom  # 2^zoom
-        min_x = max(0, min(n - 1, min_x))
-        max_x = max(0, min(n - 1, max_x))
-        min_y = max(0, min(n - 1, min_y))
-        max_y = max(0, min(n - 1, max_y))
 
-        return min_x, max_x, min_y, max_y
+        if west > east:
+            # Bounding box crosses the antimeridian
+            min_x1, min_y = self._deg2num(north, west, zoom)
+            max_x1 = n - 1
+            min_x2 = 0
+            max_x2, max_y = self._deg2num(south, east, zoom)
+
+            min_y = max(0, min(n - 1, min_y))
+            max_y = max(0, min(n - 1, max_y))
+
+            min_x1 = max(0, min(n - 1, min_x1))
+            max_x1 = max(0, min(n - 1, max_x1))
+            min_x2 = max(0, min(n - 1, min_x2))
+            max_x2 = max(0, min(n - 1, max_x2))
+
+            return [(min_x1, max_x1, min_y, max_y), (min_x2, max_x2, min_y, max_y)]
+        else:
+            # Get tile coordinates for corners
+            # Note: Y increases from north (0) to south, so northern lat = smaller Y value
+            min_x, min_y = self._deg2num(north, west, zoom)
+            max_x, max_y = self._deg2num(south, east, zoom)
+
+            # Ensure valid range
+            min_x = max(0, min(n - 1, min_x))
+            max_x = max(0, min(n - 1, max_x))
+            min_y = max(0, min(n - 1, min_y))
+            max_y = max(0, min(n - 1, max_y))
+
+            return [(min_x, max_x, min_y, max_y)]
