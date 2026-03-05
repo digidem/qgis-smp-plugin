@@ -13,8 +13,6 @@
   - *Details:* Provide a warning if the selected extent and zoom level combination is unreasonably large.
 
 ## Medium Term (v0.4.0) - Modern Mapping Features
-- [ ] **Add support for vector tiles (MVT)**
-  - *Details:* The MapLibre ecosystem is built around vector tiles. They are much smaller, scale beautifully, and allow the client to change styles dynamically.
 - [ ] **Add support for multiple sources in one SMP**
   - *Details:* Allow bundling a satellite raster background with a vector streets/labels layer in a single `.smp` file.
 - [x] **Add preview of tile grid before generation** (partial — logic layer complete)
