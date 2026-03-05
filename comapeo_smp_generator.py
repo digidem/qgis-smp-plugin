@@ -16,7 +16,6 @@ from qgis.core import (
     QgsCoordinateTransform,
     QgsRasterLayer,
     QgsVectorLayer,
-    QgsTask,
     QgsMessageLog,
     Qgis,
     QgsMapRendererCustomPainterJob
@@ -88,67 +87,6 @@ class TileCache:
         self._save()
 
 
-class SMPGeneratorTask(QgsTask):
-    """
-    QgsTask wrapper for non-blocking SMP generation.
-
-    Usage:
-        task = SMPGeneratorTask(
-            extent, min_zoom, max_zoom, output_path,
-            tile_format='PNG', jpeg_quality=85, cache_dir=None
-        )
-        QgsApplication.taskManager().addTask(task)
-    """
-
-    def __init__(self, extent, min_zoom, max_zoom, output_path,
-                 tile_format='PNG', jpeg_quality=85, cache_dir=None,
-                 max_workers=None):
-        super().__init__('Generate SMP', QgsTask.CanCancel)
-        self.extent = extent
-        self.min_zoom = min_zoom
-        self.max_zoom = max_zoom
-        self.output_path = output_path
-        self.tile_format = tile_format
-        self.jpeg_quality = jpeg_quality
-        self.cache_dir = cache_dir
-        self.max_workers = max_workers
-        self.result_path = None
-        self.error = None
-
-    def run(self):
-        """Called by QGIS task manager in a background thread."""
-        try:
-            generator = SMPGenerator(feedback=self)
-            self.result_path = generator.generate_smp_from_canvas(
-                self.extent, self.min_zoom, self.max_zoom, self.output_path,
-                tile_format=self.tile_format,
-                jpeg_quality=self.jpeg_quality,
-                cache_dir=self.cache_dir,
-                max_workers=self.max_workers,
-            )
-            return True
-        except Exception as exc:
-            self.error = str(exc)
-            return False
-
-    def finished(self, result):
-        """Called in the main thread after run() completes."""
-        if result:
-            QgsMessageLog.logMessage(
-                f'SMP generation complete: {self.result_path}',
-                'CoMapeo SMP Generator', Qgis.Info
-            )
-        else:
-            QgsMessageLog.logMessage(
-                f'SMP generation failed: {self.error}',
-                'CoMapeo SMP Generator', Qgis.Critical
-            )
-
-    def pushInfo(self, message):
-        pass
-
-    def setProgress(self, progress):
-        super().setProgress(progress)
 
 
 class SMPGenerator:

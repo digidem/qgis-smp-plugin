@@ -114,7 +114,6 @@ sys.modules['qgis.PyQt.QtGui'] = pyqt_gui_mock
 # Now import the generator (QGIS not needed for pure-logic methods)
 from comapeo_smp_generator import (  # noqa: E402
     SMPGenerator,
-    SMPGeneratorTask,
     TileCache,
     TILE_COUNT_WARNING_THRESHOLD,
     TILE_COUNT_ERROR_THRESHOLD,
@@ -168,46 +167,6 @@ class TestTileCache(unittest.TestCase):
         self.assertNotEqual(fp2, fp3)
 
 
-class TestSMPGeneratorTask(unittest.TestCase):
-    """SMPGeneratorTask stores parameters and exposes run/finished interface."""
-
-    def _make_task(self):
-        extent = _FakeRectangle(0, 0, 1, 1)
-        return SMPGeneratorTask(extent, 0, 5, '/tmp/out.smp',
-                                tile_format='PNG', jpeg_quality=85)
-
-    def test_task_stores_params(self):
-        task = self._make_task()
-        self.assertEqual(task.min_zoom, 0)
-        self.assertEqual(task.max_zoom, 5)
-        self.assertEqual(task.tile_format, 'PNG')
-        self.assertEqual(task.jpeg_quality, 85)
-        self.assertEqual(task.output_path, '/tmp/out.smp')
-
-    def test_task_run_calls_generator(self):
-        import comapeo_smp_generator as _mod
-        extent = _FakeRectangle(0, 0, 1, 1)
-        task = SMPGeneratorTask(extent, 0, 5, '/tmp/out.smp')
-
-        with patch.object(_mod.SMPGenerator, 'generate_smp_from_canvas',
-                          return_value='/tmp/out.smp') as mock_gen:
-            result = task.run()
-
-        self.assertTrue(result)
-        self.assertEqual(task.result_path, '/tmp/out.smp')
-        mock_gen.assert_called_once()
-
-    def test_task_run_captures_error(self):
-        import comapeo_smp_generator as _mod
-        extent = _FakeRectangle(0, 0, 1, 1)
-        task = SMPGeneratorTask(extent, 0, 5, '/tmp/out.smp')
-
-        with patch.object(_mod.SMPGenerator, 'generate_smp_from_canvas',
-                          side_effect=ValueError('bad params')):
-            result = task.run()
-
-        self.assertFalse(result)
-        self.assertIn('bad params', task.error)
 
 
 class TestDeg2Num(unittest.TestCase):
