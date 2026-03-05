@@ -6,7 +6,7 @@
 name=CoMapeo Map Builder
 qgisMinimumVersion=3.0
 description=Generates SMP files for CoMapeo using proper XYZ Web Mercator tiling
-version=0.2.0
+version=0.3.0
 author=Awana Digital
 email=luandro@awana.digital
 
@@ -20,6 +20,13 @@ repository=https://github.com/digidem/qgis-smp-plugin
 
 hasProcessingProvider=yes
 changelog=
+    0.3.0 - Safety & image format features
+    * Add PNG/JPG tile format selection parameter
+    * Add JPEG quality setting (1-100)
+    * Add tile count estimation with warning threshold (>5000) and error threshold (>50000)
+    * Add disk space validation before tile generation
+    * Add extent+zoom size warning for unreasonably large combinations
+    * Add comprehensive unit tests (test/test_generator.py, 29 tests)
     0.2.0 - Major compatibility fix
     * BREAKING: Implement proper Web Mercator XYZ tiling (was using incorrect formula)
     * Add lat/lon to tile coordinate conversion functions

@@ -6,6 +6,7 @@ import math
 import shutil
 import zipfile
 import tempfile
+import shutil as _shutil
 from qgis.core import (
     QgsProject,
     QgsMapSettings,
@@ -22,10 +23,24 @@ from qgis.core import (
 from qgis.PyQt.QtCore import QSize
 from qgis.PyQt.QtGui import QImage, QPainter
 
+# Warn if estimated tile count exceeds this threshold
+TILE_COUNT_WARNING_THRESHOLD = 5000
+# Error if estimated tile count exceeds this threshold (too large to be practical)
+TILE_COUNT_ERROR_THRESHOLD = 50000
+# Estimated bytes per tile (PNG ~50 KB, JPG ~15 KB)
+BYTES_PER_TILE_PNG = 50 * 1024
+BYTES_PER_TILE_JPG = 15 * 1024
+# Minimum free disk space to keep (100 MB)
+MIN_FREE_SPACE_BYTES = 100 * 1024 * 1024
+
+
 class SMPGenerator:
     """
     Class to generate SMP (Styled Map Package) files for CoMapeo
     """
+
+    TILE_FORMAT_PNG = 'PNG'
+    TILE_FORMAT_JPG = 'JPG'
 
     def __init__(self, feedback=None):
         """
@@ -78,7 +93,111 @@ class SMPGenerator:
         lat_deg = math.degrees(lat_rad)
         return lat_deg, lon_deg
 
-    def generate_smp_from_canvas(self, extent, min_zoom, max_zoom, output_path):
+    def estimate_tile_count(self, extent, min_zoom, max_zoom):
+        """
+        Estimate the total number of tiles that will be generated.
+
+        :param extent: QgsRectangle extent to export
+        :param min_zoom: Minimum zoom level
+        :param max_zoom: Maximum zoom level
+        :return: Total estimated tile count
+        """
+        total = 0
+        for zoom in range(min_zoom, max_zoom + 1):
+            min_x, max_x, min_y, max_y = self._calculate_tiles_at_zoom(extent, zoom)
+            total += (max_x - min_x + 1) * (max_y - min_y + 1)
+        return total
+
+    def validate_tile_count(self, extent, min_zoom, max_zoom):
+        """
+        Check estimated tile count and return (count, warning_message).
+        Raises ValueError if count exceeds the hard error threshold.
+
+        :param extent: QgsRectangle extent
+        :param min_zoom: Minimum zoom level
+        :param max_zoom: Maximum zoom level
+        :return: Tuple of (tile_count, warning_message_or_None)
+        :raises ValueError: If tile count exceeds TILE_COUNT_ERROR_THRESHOLD
+        """
+        count = self.estimate_tile_count(extent, min_zoom, max_zoom)
+        warning = None
+
+        if count > TILE_COUNT_ERROR_THRESHOLD:
+            raise ValueError(
+                f"Estimated tile count ({count:,}) exceeds the maximum allowed "
+                f"({TILE_COUNT_ERROR_THRESHOLD:,}). Please reduce the extent or zoom range."
+            )
+
+        if count > TILE_COUNT_WARNING_THRESHOLD:
+            warning = (
+                f"Warning: estimated tile count is {count:,}. "
+                f"Generation may take a long time. Consider reducing the extent or zoom range."
+            )
+
+        return count, warning
+
+    def validate_disk_space(self, output_path, tile_count, tile_format=None):
+        """
+        Check that sufficient disk space is available for the tile generation.
+
+        :param output_path: Path to the output SMP file (used to determine disk)
+        :param tile_count: Estimated number of tiles
+        :param tile_format: Tile format ('PNG' or 'JPG')
+        :raises OSError: If insufficient disk space
+        """
+        if tile_format == self.TILE_FORMAT_JPG:
+            bytes_per_tile = BYTES_PER_TILE_JPG
+        else:
+            bytes_per_tile = BYTES_PER_TILE_PNG
+
+        estimated_bytes = tile_count * bytes_per_tile
+        estimated_mb = estimated_bytes / (1024 * 1024)
+
+        output_dir = os.path.dirname(os.path.abspath(output_path)) or '.'
+        disk_usage = _shutil.disk_usage(output_dir)
+        free_bytes = disk_usage.free
+
+        self.log(
+            f"Disk space: {free_bytes / (1024*1024):.1f} MB free, "
+            f"estimated {estimated_mb:.1f} MB needed for tiles"
+        )
+
+        required_bytes = estimated_bytes + MIN_FREE_SPACE_BYTES
+        if free_bytes < required_bytes:
+            raise OSError(
+                f"Insufficient disk space. Estimated {estimated_mb:.1f} MB needed, "
+                f"but only {free_bytes / (1024*1024):.1f} MB available on disk."
+            )
+
+    def validate_extent_size(self, extent, min_zoom, max_zoom):
+        """
+        Warn if the extent+zoom combination is unreasonably large.
+
+        :param extent: QgsRectangle extent in project CRS
+        :param min_zoom: Minimum zoom level
+        :param max_zoom: Maximum zoom level
+        :return: Warning message string, or None if extent is acceptable
+        """
+        bounds = self._get_bounds_wgs84(extent)
+        west, south, east, north = bounds
+
+        lon_span = abs(east - west)
+        lat_span = abs(north - south)
+
+        # Heuristic: warn if extent is very large at high zoom levels
+        # At zoom 14, a single tile covers ~2.4 km. A 1-degree span ≈ 111 km,
+        # so 1 degree at zoom 14 ≈ 46 tiles. > 10 degrees at zoom > 12 is suspicious.
+        if max_zoom > 12 and (lon_span > 10 or lat_span > 10):
+            return (
+                f"Warning: large extent ({lon_span:.1f}° wide, {lat_span:.1f}° tall) "
+                f"combined with max zoom {max_zoom} may produce excessive tiles. "
+                f"Consider reducing the extent or maximum zoom level."
+            )
+
+        return None
+
+    def generate_smp_from_canvas(self, extent, min_zoom, max_zoom, output_path,
+                                 tile_format=None, jpeg_quality=85):
         """
         Generate an SMP file from the current map canvas
 
@@ -86,25 +205,48 @@ class SMPGenerator:
         :param min_zoom: Minimum zoom level
         :param max_zoom: Maximum zoom level
         :param output_path: Output path for the SMP file
+        :param tile_format: Tile image format ('PNG' or 'JPG'). Defaults to 'PNG'.
+        :param jpeg_quality: JPEG compression quality (1-100). Only used when
+                             tile_format is 'JPG'. Defaults to 85.
         :return: Path to the generated SMP file
         """
+        if tile_format is None:
+            tile_format = self.TILE_FORMAT_PNG
+
+        tile_format = tile_format.upper()
+        if tile_format not in (self.TILE_FORMAT_PNG, self.TILE_FORMAT_JPG):
+            raise ValueError(f"Unsupported tile format: {tile_format}. Use 'PNG' or 'JPG'.")
+
+        jpeg_quality = max(1, min(100, int(jpeg_quality)))
+
         self.log(f"Generating SMP file with zoom levels {min_zoom}-{max_zoom}")
         self.log(f"Extent: {extent.asWktPolygon()}")
+        self.log(f"Tile format: {tile_format}" +
+                 (f", JPEG quality: {jpeg_quality}" if tile_format == self.TILE_FORMAT_JPG else ""))
+
+        # --- Pre-generation validations ---
+        tile_count, count_warning = self.validate_tile_count(extent, min_zoom, max_zoom)
+        self.log(f"Estimated tile count: {tile_count:,}")
+        if count_warning:
+            self.log(count_warning, Qgis.Warning)
+
+        extent_warning = self.validate_extent_size(extent, min_zoom, max_zoom)
+        if extent_warning:
+            self.log(extent_warning, Qgis.Warning)
+
+        self.validate_disk_space(output_path, tile_count, tile_format)
 
         # Create a temporary directory for the SMP contents
         temp_dir = tempfile.mkdtemp()
         self.log(f"Using temporary directory: {temp_dir}")
 
         try:
-            # Get the current project
-            project = QgsProject.instance()
-
             # Create the 's' directory for the style
             style_dir = os.path.join(temp_dir, "s")
             os.makedirs(style_dir, exist_ok=True)
 
             # Generate the style.json file in the root directory
-            style = self._create_style_from_canvas(extent, min_zoom, max_zoom)
+            style = self._create_style_from_canvas(extent, min_zoom, max_zoom, tile_format)
             style_path = os.path.join(temp_dir, "style.json")
             with open(style_path, 'w') as f:
                 json.dump(style, f, indent=4)
@@ -112,7 +254,10 @@ class SMPGenerator:
             # Generate tiles in the 's/0' directory
             tiles_dir = os.path.join(style_dir, "0")
             os.makedirs(tiles_dir, exist_ok=True)
-            self._generate_tiles_from_canvas(extent, min_zoom, max_zoom, tiles_dir)
+            self._generate_tiles_from_canvas(
+                extent, min_zoom, max_zoom, tiles_dir,
+                tile_format=tile_format, jpeg_quality=jpeg_quality
+            )
 
             # Create the SMP file (zip archive)
             self._create_smp_archive(temp_dir, output_path)
@@ -129,15 +274,21 @@ class SMPGenerator:
                 shutil.rmtree(temp_dir)
                 self.log(f"Cleaned up temporary directory: {temp_dir}")
 
-    def _create_style_from_canvas(self, extent, min_zoom, max_zoom):
+    def _create_style_from_canvas(self, extent, min_zoom, max_zoom, tile_format=None):
         """
         Create a MapLibre style JSON from the current map canvas
 
         :param extent: Extent to export
         :param min_zoom: Minimum zoom level
         :param max_zoom: Maximum zoom level
+        :param tile_format: Tile image format ('PNG' or 'JPG')
         :return: Style JSON object
         """
+        if tile_format is None:
+            tile_format = self.TILE_FORMAT_PNG
+
+        tile_ext = 'jpg' if tile_format.upper() == self.TILE_FORMAT_JPG else 'png'
+
         # Get the layer bounds in WGS84
         bounds = self._get_bounds_wgs84(extent)
 
@@ -155,7 +306,7 @@ class SMPGenerator:
             "name": "QGIS MAP",
             "sources": {
                 source_id: {
-                    "format": "png",
+                    "format": tile_ext,
                     "name": "QGIS Map",
                     "version": "2.0",
                     "type": "raster",
@@ -165,7 +316,7 @@ class SMPGenerator:
                     "bounds": bounds,
                     "center": [0, 0, 6],
                     "tiles": [
-                        "smp://maps.v1/s/0/{z}/{x}/{y}.png"
+                        f"smp://maps.v1/s/0/{{z}}/{{x}}/{{y}}.{tile_ext}"
                     ]
                 }
             },
@@ -224,7 +375,8 @@ class SMPGenerator:
             wgs84_extent.yMaximum()
         ]
 
-    def _generate_tiles_from_canvas(self, extent, min_zoom, max_zoom, tiles_dir):
+    def _generate_tiles_from_canvas(self, extent, min_zoom, max_zoom, tiles_dir,
+                                    tile_format=None, jpeg_quality=85):
         """
         Generate tiles from the current map canvas
 
@@ -232,7 +384,16 @@ class SMPGenerator:
         :param min_zoom: Minimum zoom level
         :param max_zoom: Maximum zoom level
         :param tiles_dir: Directory to save tiles
+        :param tile_format: Tile image format ('PNG' or 'JPG')
+        :param jpeg_quality: JPEG compression quality (1-100)
         """
+        if tile_format is None:
+            tile_format = self.TILE_FORMAT_PNG
+
+        tile_format = tile_format.upper()
+        tile_ext = 'jpg' if tile_format == self.TILE_FORMAT_JPG else 'png'
+        qt_format = 'JPEG' if tile_format == self.TILE_FORMAT_JPG else 'PNG'
+
         self.log("Generating tiles from map canvas...")
 
         # Get the current project
@@ -244,7 +405,10 @@ class SMPGenerator:
 
         # Add all visible layers from the project
         layers = project.mapLayers().values()
-        visible_layers = [layer for layer in layers if project.layerTreeRoot().findLayer(layer.id()).isVisible()]
+        visible_layers = [
+            layer for layer in layers
+            if project.layerTreeRoot().findLayer(layer.id()).isVisible()
+        ]
         map_settings.setLayers(visible_layers)
 
         # Calculate total tiles across all zoom levels for progress tracking
@@ -268,7 +432,10 @@ class SMPGenerator:
             zoom_dir = os.path.join(tiles_dir, str(zoom))
             os.makedirs(zoom_dir, exist_ok=True)
 
-            self.log(f"Zoom level {zoom}: {num_tiles} tiles ({max_x - min_x + 1}x{max_y - min_y + 1})")
+            self.log(
+                f"Zoom level {zoom}: {num_tiles} tiles "
+                f"({max_x - min_x + 1}x{max_y - min_y + 1})"
+            )
 
             # Generate tiles for this zoom level
             for x in range(min_x, max_x + 1):
@@ -281,8 +448,13 @@ class SMPGenerator:
                     map_settings.setExtent(tile_extent)
 
                     # Render the tile
-                    img = QImage(tile_size, tile_size, QImage.Format_ARGB32)
-                    img.fill(0)  # Transparent background
+                    if tile_format == self.TILE_FORMAT_JPG:
+                        # JPEG does not support transparency; use white background
+                        img = QImage(tile_size, tile_size, QImage.Format_RGB32)
+                        img.fill(0xFFFFFFFF)  # White background
+                    else:
+                        img = QImage(tile_size, tile_size, QImage.Format_ARGB32)
+                        img.fill(0)  # Transparent background
 
                     painter = QPainter(img)
                     job = QgsMapRendererCustomPainterJob(map_settings, painter)
@@ -291,8 +463,11 @@ class SMPGenerator:
                     painter.end()
 
                     # Save the tile
-                    tile_path = os.path.join(x_dir, f"{y}.png")
-                    img.save(tile_path, "PNG")
+                    tile_path = os.path.join(x_dir, f"{y}.{tile_ext}")
+                    if tile_format == self.TILE_FORMAT_JPG:
+                        img.save(tile_path, qt_format, jpeg_quality)
+                    else:
+                        img.save(tile_path, qt_format)
 
                     tiles_completed += 1
 

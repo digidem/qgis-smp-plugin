@@ -34,7 +34,9 @@ from qgis.PyQt.QtCore import QCoreApplication
 from qgis.core import (QgsProcessingAlgorithm,
                        QgsProcessingParameterExtent,
                        QgsProcessingParameterNumber,
+                       QgsProcessingParameterEnum,
                        QgsProcessingParameterFileDestination,
+                       QgsProcessingException,
                        QgsRectangle,
                        QgsProject,
                        QgsMapSettings,
@@ -51,6 +53,8 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
     - The extent of the area to export
     - The minimum zoom level
     - The maximum zoom level
+    - The tile image format (PNG or JPG)
+    - The JPEG quality (when JPG is selected)
 
     All Processing algorithms should extend the QgsProcessingAlgorithm
     class.
@@ -63,7 +67,12 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
     EXTENT = 'EXTENT'
     MIN_ZOOM = 'MIN_ZOOM'
     MAX_ZOOM = 'MAX_ZOOM'
+    TILE_FORMAT = 'TILE_FORMAT'
+    JPEG_QUALITY = 'JPEG_QUALITY'
     OUTPUT_FILE = 'OUTPUT_FILE'
+
+    # Tile format options presented to the user
+    TILE_FORMAT_OPTIONS = ['PNG', 'JPG']
 
     def initAlgorithm(self, config):
         """
@@ -106,6 +115,29 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
             )
         )
 
+        # Add tile format parameter (PNG / JPG)
+        self.addParameter(
+            QgsProcessingParameterEnum(
+                self.TILE_FORMAT,
+                self.tr('Tile image format'),
+                options=self.TILE_FORMAT_OPTIONS,
+                defaultValue=0,  # PNG
+                optional=False
+            )
+        )
+
+        # Add JPEG quality parameter (only meaningful when JPG is selected)
+        jpeg_quality_param = QgsProcessingParameterNumber(
+            self.JPEG_QUALITY,
+            self.tr('JPEG quality (1-100, only used when format is JPG)'),
+            QgsProcessingParameterNumber.Integer,
+            defaultValue=85,
+            optional=True,
+            minValue=1,
+            maxValue=100
+        )
+        self.addParameter(jpeg_quality_param)
+
         # Add output file parameter
         self.addParameter(
             QgsProcessingParameterFileDestination(
@@ -127,15 +159,33 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
         min_zoom = self.parameterAsInt(parameters, self.MIN_ZOOM, context)
         max_zoom = self.parameterAsInt(parameters, self.MAX_ZOOM, context)
 
+        # Get tile format
+        tile_format_index = self.parameterAsEnum(parameters, self.TILE_FORMAT, context)
+        tile_format = self.TILE_FORMAT_OPTIONS[tile_format_index]
+
+        # Get JPEG quality
+        jpeg_quality = self.parameterAsInt(parameters, self.JPEG_QUALITY, context)
+        if jpeg_quality is None or jpeg_quality <= 0:
+            jpeg_quality = 85
+
         # Get the output file path
         output_file = self.parameterAsFileOutput(parameters, self.OUTPUT_FILE, context)
 
+        # Validate zoom range
+        if min_zoom > max_zoom:
+            raise QgsProcessingException(
+                self.tr('Minimum zoom level must be less than or equal to maximum zoom level.')
+            )
+
         # Log the parameters for debugging
-        feedback.pushInfo(f'Using all visible layers from the current map canvas')
-        feedback.pushInfo(f'Extent: {extent.asWktPolygon()}')
-        feedback.pushInfo(f'Min zoom: {min_zoom}')
-        feedback.pushInfo(f'Max zoom: {max_zoom}')
-        feedback.pushInfo(f'Output file: {output_file}')
+        feedback.pushInfo(self.tr('Using all visible layers from the current map canvas'))
+        feedback.pushInfo(self.tr(f'Extent: {extent.asWktPolygon()}'))
+        feedback.pushInfo(self.tr(f'Min zoom: {min_zoom}'))
+        feedback.pushInfo(self.tr(f'Max zoom: {max_zoom}'))
+        feedback.pushInfo(self.tr(f'Tile format: {tile_format}'))
+        if tile_format == 'JPG':
+            feedback.pushInfo(self.tr(f'JPEG quality: {jpeg_quality}'))
+        feedback.pushInfo(self.tr(f'Output file: {output_file}'))
 
         # Create a rectangle from the extent
         rect = QgsRectangle(
@@ -147,7 +197,14 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
 
         # Generate the SMP file
         generator = SMPGenerator(feedback)
-        output_path = generator.generate_smp_from_canvas(rect, min_zoom, max_zoom, output_file)
+
+        try:
+            output_path = generator.generate_smp_from_canvas(
+                rect, min_zoom, max_zoom, output_file,
+                tile_format=tile_format, jpeg_quality=jpeg_quality
+            )
+        except (ValueError, OSError) as e:
+            raise QgsProcessingException(str(e))
 
         # Return the results
         return {self.OUTPUT_FILE: output_path}
