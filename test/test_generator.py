@@ -295,6 +295,50 @@ class TestValidateExtentSize(unittest.TestCase):
         self.assertIsNone(warning)
 
 
+class TestTileGridRects(unittest.TestCase):
+    """Test get_tile_grid_rects returns correct tile bounding boxes."""
+
+    def setUp(self):
+        self.gen = SMPGenerator()
+        self.gen._get_bounds_wgs84 = lambda ext: [
+            ext.xMinimum(), ext.yMinimum(), ext.xMaximum(), ext.yMaximum()
+        ]
+
+    def _make_extent(self, west, south, east, north):
+        return _FakeRectangle(west, south, east, north)
+
+    def test_zoom0_returns_one_rect(self):
+        extent = self._make_extent(-180, -85, 180, 85)
+        rects = self.gen.get_tile_grid_rects(extent, 0, 0)
+        self.assertEqual(len(rects), 1)
+        r = rects[0]
+        self.assertEqual(r['zoom'], 0)
+        self.assertEqual(r['x'], 0)
+        self.assertEqual(r['y'], 0)
+
+    def test_rect_has_required_keys(self):
+        extent = self._make_extent(0, 0, 1, 1)
+        rects = self.gen.get_tile_grid_rects(extent, 0, 0)
+        self.assertGreater(len(rects), 0)
+        for key in ('zoom', 'x', 'y', 'west', 'south', 'east', 'north'):
+            self.assertIn(key, rects[0])
+
+    def test_rect_count_matches_estimate(self):
+        """get_tile_grid_rects count must equal estimate_tile_count."""
+        extent = self._make_extent(-10, -10, 10, 10)
+        rects = self.gen.get_tile_grid_rects(extent, 0, 3)
+        estimated = self.gen.estimate_tile_count(extent, 0, 3)
+        self.assertEqual(len(rects), estimated)
+
+    def test_wgs84_bounds_ordering(self):
+        """Each rect must satisfy west < east and south < north."""
+        extent = self._make_extent(-20, -20, 20, 20)
+        rects = self.gen.get_tile_grid_rects(extent, 1, 2)
+        for r in rects:
+            self.assertLess(r['west'], r['east'], f"west >= east in {r}")
+            self.assertLess(r['south'], r['north'], f"south >= north in {r}")
+
+
 class TestTileFormatConstants(unittest.TestCase):
     """Test tile format constants and defaults."""
 
@@ -470,6 +514,36 @@ class TestProgressSmoothing(unittest.TestCase):
         self.assertLessEqual(call_count, 101)
         # Should be called at least once
         self.assertGreaterEqual(call_count, 1)
+
+
+class TestParallelTileRendering(unittest.TestCase):
+    """_generate_tiles_from_canvas with max_workers > 1 produces same tile files."""
+
+    def test_parallel_produces_tile_files(self):
+        gen = SMPGenerator()
+        gen._get_bounds_wgs84 = MagicMock(return_value=[-1, -1, 1, 1])
+        gen._calculate_tiles_at_zoom = MagicMock(return_value=(0, 1, 0, 1))  # 4 tiles
+        gen._calculate_tile_extent = MagicMock(return_value=MagicMock())
+
+        import comapeo_smp_generator as _mod
+        fake_img = MagicMock()
+        fake_img.save = MagicMock()
+
+        tmp = tempfile.mkdtemp()
+        try:
+            with patch('comapeo_smp_generator.QImage', return_value=fake_img), \
+                 patch('comapeo_smp_generator.QPainter', MagicMock()), \
+                 patch('comapeo_smp_generator.QgsMapRendererCustomPainterJob', MagicMock()), \
+                 patch.object(_mod, 'QgsMapSettings', MagicMock()), \
+                 patch.object(_mod, 'QgsProject', _FakeProject):
+                gen._generate_tiles_from_canvas(
+                    _FakeRectangle(-1, -1, 1, 1), 0, 0, tmp,
+                    tile_format='PNG', max_workers=2
+                )
+            # img.save should have been called 4 times (2x2 tile grid)
+            self.assertEqual(fake_img.save.call_count, 4)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class TestCacheDirectory(unittest.TestCase):

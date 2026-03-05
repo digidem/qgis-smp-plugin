@@ -12,23 +12,23 @@
 - [x] **Add extent size validation/warning**
   - *Details:* Provide a warning if the selected extent and zoom level combination is unreasonably large.
 
-## Medium Term - Modern Mapping Features
+## Medium Term (v0.4.0) - Modern Mapping Features
 - [ ] **Add support for vector tiles (MVT)**
   - *Details:* The MapLibre ecosystem is built around vector tiles. They are much smaller, scale beautifully, and allow the client to change styles dynamically.
 - [ ] **Add support for multiple sources in one SMP**
   - *Details:* Allow bundling a satellite raster background with a vector streets/labels layer in a single `.smp` file.
-- [ ] **Add preview of tile grid before generation**
-  - *Details:* Great for user experience, visualizing what will be generated.
-- [ ] **Add resume capability for interrupted generations / Cache Directory**
-  - *Details:* Useful when generations take a long time or fail halfway. Allows keeping generated tiles on disk and resuming instead of starting over.
-- [ ] **Progress Feedback Smoothing**
-  - *Details:* Update the progress bar only when the percentage changes significantly (e.g., batch updates every 50-100 tiles) to reduce UI bottleneck during massive generations.
+- [x] **Add preview of tile grid before generation** (partial — logic layer complete)
+  - *Details:* `get_tile_grid_rects(extent, min_zoom, max_zoom)` added to SMPGenerator; returns WGS84 bounding dicts for every tile. QGIS canvas overlay (UI layer) is a separate future task.
+- [x] **Add resume capability for interrupted generations / Cache Directory**
+  - *Details:* `cache_dir` parameter on `generate_smp_from_canvas`; tiles persisted across runs; existing tiles skipped via `resume=True` in `_generate_tiles_from_canvas`. Committed e7b58e3.
+- [x] **Progress Feedback Smoothing**
+  - *Details:* `_generate_tiles_from_canvas` tracks `last_reported_pct`; `feedback.setProgress()` called only when integer percentage changes. Committed e7b58e3.
 
 ## Long Term - Performance & Integration
 - [ ] **Background processing for large tile generations**
   - *Details:* Generating tiles is CPU-intensive. Running it in the background prevents locking up the QGIS UI.
-- [ ] **Parallel tile rendering**
-  - *Details:* Take advantage of modern multi-core processors to speed up the process significantly.
+- [x] **Parallel tile rendering**
+  - *Details:* `_generate_tiles_from_canvas` now uses `ThreadPoolExecutor` with `max_workers` (default = CPU count). Each thread gets its own `QgsMapSettings` instance. Resume logic preserved in `_render_single_tile`. Committed alongside tile-grid preview.
 - [ ] **Incremental updates (only regenerate changed tiles)**
   - *Details:* Extremely useful for large areas where only a small portion of the data changes frequently.
 - [ ] **Direct integration with CoMapeo API**

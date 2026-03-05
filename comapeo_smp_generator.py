@@ -3,10 +3,12 @@
 import os
 import json
 import math
+import threading
 import shutil
 import zipfile
 import tempfile
 import shutil as _shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from qgis.core import (
     QgsProject,
     QgsMapSettings,
@@ -196,6 +198,35 @@ class SMPGenerator:
 
         return None
 
+    def get_tile_grid_rects(self, extent, min_zoom, max_zoom):
+        """
+        Return the WGS84 bounding rectangles of all tiles that would be generated.
+
+        :param extent: QgsRectangle extent in project CRS
+        :param min_zoom: Minimum zoom level
+        :param max_zoom: Maximum zoom level
+        :return: list of dicts:
+                 [{"zoom": z, "x": x, "y": y,
+                   "west": w, "south": s, "east": e, "north": n}, ...]
+        """
+        rects = []
+        for zoom in range(min_zoom, max_zoom + 1):
+            min_x, max_x, min_y, max_y = self._calculate_tiles_at_zoom(extent, zoom)
+            for x in range(min_x, max_x + 1):
+                for y in range(min_y, max_y + 1):
+                    north, west = self._num2deg(x, y, zoom)
+                    south, east = self._num2deg(x + 1, y + 1, zoom)
+                    rects.append({
+                        "zoom": zoom,
+                        "x": x,
+                        "y": y,
+                        "west": west,
+                        "south": south,
+                        "east": east,
+                        "north": north
+                    })
+        return rects
+
     def generate_smp_from_canvas(self, extent, min_zoom, max_zoom, output_path,
                                  tile_format=None, jpeg_quality=85, cache_dir=None):
         """
@@ -261,7 +292,8 @@ class SMPGenerator:
             self._generate_tiles_from_canvas(
                 extent, min_zoom, max_zoom, tiles_dir,
                 tile_format=tile_format, jpeg_quality=jpeg_quality,
-                resume=(cache_dir is not None)
+                resume=(cache_dir is not None),
+                max_workers=None
             )
 
             # Create the SMP file (zip archive)
@@ -384,8 +416,64 @@ class SMPGenerator:
             wgs84_extent.yMaximum()
         ]
 
+    def _render_single_tile(self, map_settings_template, zoom, x, y, tiles_dir,
+                            tile_format, jpeg_quality, resume):
+        """
+        Render a single tile and save it to disk.
+
+        :param map_settings_template: Preconfigured QgsMapSettings template
+        :param zoom: Zoom level
+        :param x: Tile x coordinate
+        :param y: Tile y coordinate
+        :param tiles_dir: Root directory for tiles
+        :param tile_format: Tile image format ('PNG' or 'JPG')
+        :param jpeg_quality: JPEG compression quality (1-100)
+        :param resume: Skip rendering if tile already exists
+        :return: True if rendered, False if skipped
+        """
+        tile_ext = 'jpg' if tile_format == self.TILE_FORMAT_JPG else 'png'
+        qt_format = 'JPEG' if tile_format == self.TILE_FORMAT_JPG else 'PNG'
+
+        x_dir = os.path.join(tiles_dir, str(zoom), str(x))
+        os.makedirs(x_dir, exist_ok=True)
+        tile_path = os.path.join(x_dir, f"{y}.{tile_ext}")
+
+        if resume and os.path.exists(tile_path):
+            return False
+
+        tile_extent = self._calculate_tile_extent(x, y, zoom)
+
+        # Each thread must use an independent map settings instance.
+        ms = QgsMapSettings()
+        ms.setDestinationCrs(map_settings_template.destinationCrs())
+        ms.setLayers(map_settings_template.layers())
+        ms.setOutputSize(map_settings_template.outputSize())
+        ms.setExtent(tile_extent)
+
+        tile_size = 256
+        if tile_format == self.TILE_FORMAT_JPG:
+            img = QImage(tile_size, tile_size, QImage.Format_RGB32)
+            img.fill(0xFFFFFFFF)
+        else:
+            img = QImage(tile_size, tile_size, QImage.Format_ARGB32)
+            img.fill(0)
+
+        painter = QPainter(img)
+        job = QgsMapRendererCustomPainterJob(ms, painter)
+        job.start()
+        job.waitForFinished()
+        painter.end()
+
+        if tile_format == self.TILE_FORMAT_JPG:
+            img.save(tile_path, qt_format, jpeg_quality)
+        else:
+            img.save(tile_path, qt_format)
+
+        return True
+
     def _generate_tiles_from_canvas(self, extent, min_zoom, max_zoom, tiles_dir,
-                                    tile_format=None, jpeg_quality=85, resume=False):
+                                    tile_format=None, jpeg_quality=85, resume=False,
+                                    max_workers=None):
         """
         Generate tiles from the current map canvas
 
@@ -396,13 +484,12 @@ class SMPGenerator:
         :param tile_format: Tile image format ('PNG' or 'JPG')
         :param jpeg_quality: JPEG compression quality (1-100)
         :param resume: Skip rendering for tiles already present in tiles_dir
+        :param max_workers: Number of thread workers. None uses CPU count.
         """
         if tile_format is None:
             tile_format = self.TILE_FORMAT_PNG
 
         tile_format = tile_format.upper()
-        tile_ext = 'jpg' if tile_format == self.TILE_FORMAT_JPG else 'png'
-        qt_format = 'JPEG' if tile_format == self.TILE_FORMAT_JPG else 'PNG'
 
         self.log("Generating tiles from map canvas...")
 
@@ -436,62 +523,38 @@ class SMPGenerator:
         tile_size = 256
         map_settings.setOutputSize(QSize(tile_size, tile_size))
 
-        # Generate tiles with cumulative progress
-        tiles_completed = 0
-        last_reported_pct = -1
         for zoom, min_x, max_x, min_y, max_y, num_tiles in tiles_by_zoom:
-            zoom_dir = os.path.join(tiles_dir, str(zoom))
-            os.makedirs(zoom_dir, exist_ok=True)
-
             self.log(
                 f"Zoom level {zoom}: {num_tiles} tiles "
                 f"({max_x - min_x + 1}x{max_y - min_y + 1})"
             )
 
-            # Generate tiles for this zoom level
-            for x in range(min_x, max_x + 1):
-                x_dir = os.path.join(zoom_dir, str(x))
-                os.makedirs(x_dir, exist_ok=True)
+        tile_tasks = [
+            (zoom, x, y)
+            for zoom, min_x, max_x, min_y, max_y, _ in tiles_by_zoom
+            for x in range(min_x, max_x + 1)
+            for y in range(min_y, max_y + 1)
+        ]
 
-                for y in range(min_y, max_y + 1):
-                    tile_path = os.path.join(x_dir, f"{y}.{tile_ext}")
-                    if resume and os.path.exists(tile_path):
-                        tiles_completed += 1
-                        if self.feedback and total_tiles > 0:
-                            new_pct = int((tiles_completed / total_tiles) * 100)
-                            if new_pct != last_reported_pct:
-                                self.feedback.setProgress(new_pct)
-                                last_reported_pct = new_pct
-                        continue
+        tiles_completed = 0
+        last_reported_pct = -1
+        lock = threading.Lock()
+        effective_workers = max_workers if max_workers is not None else os.cpu_count() or 1
 
-                    # Calculate the tile extent using proper XYZ bounds
-                    tile_extent = self._calculate_tile_extent(x, y, zoom)
-                    map_settings.setExtent(tile_extent)
+        with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+            futures = {
+                executor.submit(
+                    self._render_single_tile,
+                    map_settings, zoom, x, y, tiles_dir,
+                    tile_format, jpeg_quality, resume
+                ): (zoom, x, y)
+                for zoom, x, y in tile_tasks
+            }
 
-                    # Render the tile
-                    if tile_format == self.TILE_FORMAT_JPG:
-                        # JPEG does not support transparency; use white background
-                        img = QImage(tile_size, tile_size, QImage.Format_RGB32)
-                        img.fill(0xFFFFFFFF)  # White background
-                    else:
-                        img = QImage(tile_size, tile_size, QImage.Format_ARGB32)
-                        img.fill(0)  # Transparent background
-
-                    painter = QPainter(img)
-                    job = QgsMapRendererCustomPainterJob(map_settings, painter)
-                    job.start()
-                    job.waitForFinished()
-                    painter.end()
-
-                    # Save the tile
-                    if tile_format == self.TILE_FORMAT_JPG:
-                        img.save(tile_path, qt_format, jpeg_quality)
-                    else:
-                        img.save(tile_path, qt_format)
-
+            for future in as_completed(futures):
+                future.result()
+                with lock:
                     tiles_completed += 1
-
-                    # Update overall progress
                     if self.feedback and total_tiles > 0:
                         new_pct = int((tiles_completed / total_tiles) * 100)
                         if new_pct != last_reported_pct:
@@ -570,4 +633,3 @@ class SMPGenerator:
         max_y = max(0, min(n - 1, max_y))
 
         return min_x, max_x, min_y, max_y
-
