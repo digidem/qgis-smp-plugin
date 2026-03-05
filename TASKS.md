@@ -19,8 +19,10 @@
   - *Details:* Allow bundling a satellite raster background with a vector streets/labels layer in a single `.smp` file.
 - [ ] **Add preview of tile grid before generation**
   - *Details:* Great for user experience, visualizing what will be generated.
-- [ ] **Add resume capability for interrupted generations**
-  - *Details:* Useful when generations take a long time or fail halfway.
+- [ ] **Add resume capability for interrupted generations / Cache Directory**
+  - *Details:* Useful when generations take a long time or fail halfway. Allows keeping generated tiles on disk and resuming instead of starting over.
+- [ ] **Progress Feedback Smoothing**
+  - *Details:* Update the progress bar only when the percentage changes significantly (e.g., batch updates every 50-100 tiles) to reduce UI bottleneck during massive generations.
 
 ## Long Term - Performance & Integration
 - [ ] **Background processing for large tile generations**
