@@ -37,31 +37,31 @@
 ## Testing & QA Checklist
 
 ### Functional Tests
-- [ ] Plugin loads in QGIS without errors
-- [ ] Processing algorithm appears in toolbox
-- [ ] Can select extent interactively
-- [ ] Can set zoom range (0-24)
-- [ ] Can specify output path
-- [ ] Progress bar shows correctly
-- [ ] SMP file is created
-- [ ] SMP file structure is correct
-- [ ] `style.json` is valid JSON
+- [ ] Plugin loads in QGIS without errors *(requires QGIS runtime)*
+- [ ] Processing algorithm appears in toolbox *(requires QGIS runtime)*
+- [ ] Can select extent interactively *(requires QGIS runtime)*
+- [ ] Can set zoom range (0-24) *(requires QGIS runtime)*
+- [ ] Can specify output path *(requires QGIS runtime)*
+- [ ] Progress bar shows correctly *(requires QGIS runtime)*
+- [ ] SMP file is created *(requires QGIS runtime)*
+- [x] SMP file structure is correct — `TestSMPArchiveStructure` (61 tests)
+- [x] `style.json` is valid JSON — `TestSMPArchiveStructure.test_style_json_is_valid_json`
 
 ### Tile Validation Tests
-- [ ] Zoom 0 produces 1 tile (or correct subset)
-- [ ] Zoom 1 produces correct number of tiles (1-4)
-- [ ] Tiles are 256x256 pixels
-- [ ] Tiles cover the specified extent
-- [ ] No extra tiles generated outside extent
+- [x] Zoom 0 produces 1 tile (or correct subset) — `TestEstimateTileCount.test_zoom0_whole_world`
+- [x] Zoom 1 produces correct number of tiles (1-4) — `TestEstimateTileCount.test_zoom1_nw_quadrant`
+- [ ] Tiles are 256x256 pixels *(requires QGIS runtime)*
+- [ ] Tiles cover the specified extent *(requires QGIS runtime)*
+- [ ] No extra tiles generated outside extent *(requires QGIS runtime)*
 
 ### Error Handling Tests
-- [ ] Invalid extent shows error
-- [ ] Invalid zoom range shows error
-- [ ] Unwritable output path shows error
-- [ ] Temp directory cleaned up on success/error
-- [ ] Error messages are clear and helpful
+- [ ] Invalid extent shows error *(requires QGIS runtime)*
+- [x] Invalid zoom range shows error — `TestCheckParameterValues.test_inverted_zoom_range_blocked`
+- [x] Unwritable output path shows error — `TestErrorHandling.test_unwritable_output_raises`
+- [x] Temp directory cleaned up on success/error — `TestErrorHandling.test_temp_dir_cleaned_up_on_{success,error}`
+- [x] Error messages are clear and helpful — `TestErrorHandling.test_invalid_zoom_range_message_contains_values`
 
-### CoMapeo Integration Tests
+### CoMapeo Integration Tests *(all require device/runtime)*
 - [ ] SMP loads in CoMapeo
 - [ ] Tiles display at correct locations
 - [ ] Tiles align with other map sources

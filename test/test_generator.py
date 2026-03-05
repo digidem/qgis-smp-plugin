@@ -883,5 +883,168 @@ class TestCheckParameterValues(unittest.TestCase):
         self.assertTrue(ok)
 
 
+class TestSMPArchiveStructure(unittest.TestCase):
+    """SMP archive must contain style.json and tiles under s/0/."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _build_minimal_smp(self):
+        """Build a real SMP zip using _build_smp_archive with synthetic content."""
+        gen = SMPGenerator()
+
+        # Create a fake style.json
+        style_path = os.path.join(self.tmp, 'style.json')
+        import json
+        with open(style_path, 'w') as f:
+            json.dump({"version": 8, "sources": {}, "layers": []}, f)
+
+        # Create a fake tile tree: z=0/x=0/y=0.png
+        tiles_dir = os.path.join(self.tmp, 'tiles')
+        tile_file_dir = os.path.join(tiles_dir, '0', '0')
+        os.makedirs(tile_file_dir, exist_ok=True)
+        tile_path = os.path.join(tile_file_dir, '0.png')
+        with open(tile_path, 'wb') as f:
+            f.write(b'\x89PNG\r\n\x1a\n')  # PNG magic bytes
+
+        out_path = os.path.join(self.tmp, 'output.smp')
+        gen._build_smp_archive(style_path=style_path,
+                               tiles_dir=tiles_dir,
+                               output_path=out_path)
+        return out_path
+
+    def test_smp_is_valid_zip(self):
+        import zipfile
+        smp = self._build_minimal_smp()
+        self.assertTrue(zipfile.is_zipfile(smp))
+
+    def test_smp_contains_style_json(self):
+        import zipfile
+        smp = self._build_minimal_smp()
+        with zipfile.ZipFile(smp) as zf:
+            names = zf.namelist()
+        self.assertIn('style.json', names)
+
+    def test_style_json_is_valid_json(self):
+        import zipfile
+        import json
+        smp = self._build_minimal_smp()
+        with zipfile.ZipFile(smp) as zf:
+            data = json.loads(zf.read('style.json'))
+        self.assertIn('version', data)
+        self.assertEqual(data['version'], 8)
+
+    def test_smp_contains_tile_under_s_0(self):
+        import zipfile
+        smp = self._build_minimal_smp()
+        with zipfile.ZipFile(smp) as zf:
+            names = zf.namelist()
+        tile_entries = [n for n in names if n.startswith('s/0/')]
+        self.assertGreater(len(tile_entries), 0)
+
+    def test_tile_path_follows_z_x_y_convention(self):
+        """Tile entry must match s/0/{z}/{x}/{y}.ext pattern."""
+        import zipfile
+        import re
+        smp = self._build_minimal_smp()
+        pattern = re.compile(r'^s/0/\d+/\d+/\d+\.\w+$')
+        with zipfile.ZipFile(smp) as zf:
+            tile_entries = [n for n in zf.namelist() if n.startswith('s/0/') and '.' in n]
+        self.assertGreater(len(tile_entries), 0)
+        for entry in tile_entries:
+            self.assertRegex(entry, pattern, f"Tile path {entry!r} does not match expected pattern")
+
+
+class TestErrorHandling(unittest.TestCase):
+    """Error conditions are reported clearly and temp dirs are cleaned up."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _patched_gen(self):
+        gen = SMPGenerator()
+        gen.validate_tile_count = MagicMock(return_value=(1, None))
+        gen.validate_extent_size = MagicMock(return_value=None)
+        gen.validate_disk_space = MagicMock()
+        gen._get_bounds_wgs84 = MagicMock(return_value=[-1, -1, 1, 1])
+        gen._create_style_from_canvas = MagicMock(return_value={"version": 8})
+        gen._generate_tiles_from_canvas = MagicMock()
+        return gen
+
+    def test_unwritable_output_raises(self):
+        """Passing a path in a non-existent directory raises an error."""
+        gen = self._patched_gen()
+        gen._build_smp_archive = MagicMock(side_effect=OSError("Permission denied"))
+        extent = _FakeRectangle(-1, -1, 1, 1)
+        with self.assertRaises(OSError):
+            gen.generate_smp_from_canvas(extent, 0, 1, '/no/such/dir/out.smp')
+
+    def test_temp_dir_cleaned_up_on_success(self):
+        """After successful generation the internal temp dir must not persist."""
+        created_dirs = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def tracking_mkdtemp(*a, **kw):
+            d = real_mkdtemp(*a, **kw)
+            created_dirs.append(d)
+            return d
+
+        gen = self._patched_gen()
+        gen._build_smp_archive = MagicMock()
+
+        extent = _FakeRectangle(-1, -1, 1, 1)
+        with patch('tempfile.mkdtemp', side_effect=tracking_mkdtemp):
+            gen.generate_smp_from_canvas(extent, 0, 1, os.path.join(self.tmp, 'out.smp'))
+
+        for d in created_dirs:
+            self.assertFalse(os.path.exists(d),
+                             f"Temp dir {d} was not cleaned up after success")
+
+    def test_temp_dir_cleaned_up_on_error(self):
+        """After a generation error the internal temp dir must still be cleaned up."""
+        created_dirs = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def tracking_mkdtemp(*a, **kw):
+            d = real_mkdtemp(*a, **kw)
+            created_dirs.append(d)
+            return d
+
+        gen = self._patched_gen()
+        gen._generate_tiles_from_canvas = MagicMock(side_effect=RuntimeError("render failed"))
+
+        extent = _FakeRectangle(-1, -1, 1, 1)
+        with patch('tempfile.mkdtemp', side_effect=tracking_mkdtemp):
+            with self.assertRaises(RuntimeError):
+                gen.generate_smp_from_canvas(extent, 0, 1, os.path.join(self.tmp, 'out.smp'))
+
+        for d in created_dirs:
+            self.assertFalse(os.path.exists(d),
+                             f"Temp dir {d} was not cleaned up after error")
+
+    def test_invalid_zoom_range_message_contains_values(self):
+        """checkParameterValues error message must include both zoom values."""
+        gen = SMPGenerator()
+        gen.estimate_tile_count = MagicMock(
+            return_value=TILE_COUNT_ERROR_THRESHOLD + 1
+        )
+        extent = _FakeRectangle(-180, -85, 180, 85)
+        gen._get_bounds_wgs84 = lambda e: [e.xMinimum(), e.yMinimum(),
+                                           e.xMaximum(), e.yMaximum()]
+        try:
+            gen.validate_tile_count(extent, 0, 20)
+            self.fail("Expected ValueError not raised")
+        except ValueError as exc:
+            msg = str(exc)
+            self.assertIn('Estimated tile count', msg)
+            self.assertIn('exceeds', msg)
+
+
 if __name__ == '__main__':
     unittest.main()
