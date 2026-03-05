@@ -432,5 +432,158 @@ class TestCalculateTilesAtZoom(unittest.TestCase):
         self.assertLessEqual(max_y, n - 1)
 
 
+class TestCheckParameterValues(unittest.TestCase):
+    """
+    Unit tests for ComapeoMapBuilderAlgorithm.checkParameterValues().
+
+    We stub out the QGIS parameter helpers so the tests run without QGIS.
+    """
+
+    def _make_algorithm(self):
+        """Return a ComapeoMapBuilderAlgorithm with all QGIS calls stubbed."""
+        import sys
+        import importlib
+        import comapeo_smp_generator as _gen_mod
+
+        qgis_core = sys.modules['qgis.core']
+
+        # Fake base class that satisfies checkParameterValues contract
+        class _FakeAlgoBase:
+            def checkParameterValues(self, parameters, context):
+                return True, ''
+            def tr(self, s):
+                return s
+
+        qgis_core.QgsProcessingAlgorithm = _FakeAlgoBase
+        qgis_core.QgsProcessingParameterExtent = MagicMock()
+        qgis_core.QgsProcessingParameterNumber = MagicMock()
+        qgis_core.QgsProcessingParameterEnum = MagicMock()
+        qgis_core.QgsProcessingParameterFileDestination = MagicMock()
+        qgis_core.QgsProcessingException = Exception
+        qgis_core.QgsMapRendererCustomPainterJob = MagicMock()
+
+        # The algorithm uses a relative import: "from .comapeo_smp_generator import …"
+        # Register the already-imported generator under the package-relative name so
+        # importlib.reload() can resolve it.
+        sys.modules['comapeo_smp_algorithm'] = None  # clear cached entry if any
+        pkg_name = 'comapeo_smp_generator'
+        sys.modules[pkg_name] = _gen_mod
+
+        # Build a minimal package shim so the relative import resolves
+        import types
+        pkg_shim = types.ModuleType('comapeo_smp_plugin')
+        pkg_shim.comapeo_smp_generator = _gen_mod
+        sys.modules['comapeo_smp_plugin'] = pkg_shim
+        sys.modules['comapeo_smp_plugin.comapeo_smp_generator'] = _gen_mod
+
+        # Read and exec the algorithm source with __package__ set
+        import os
+        algo_path = os.path.join(os.path.dirname(__file__), '..', 'comapeo_smp_algorithm.py')
+        with open(os.path.abspath(algo_path)) as fh:
+            src = fh.read()
+
+        # Replace relative import with absolute so exec() works standalone
+        src = src.replace(
+            'from .comapeo_smp_generator import SMPGenerator',
+            'from comapeo_smp_generator import SMPGenerator'
+        )
+
+        # Make QCoreApplication.translate return the raw string so tr() is transparent
+        pyqt_core = sys.modules['qgis.PyQt.QtCore']
+        pyqt_core.QCoreApplication = MagicMock()
+        pyqt_core.QCoreApplication.translate = MagicMock(side_effect=lambda ctx, s: s)
+
+        ns = {'__name__': 'comapeo_smp_algorithm', '__package__': 'comapeo_smp_plugin'}
+        exec(compile(src, algo_path, 'exec'), ns)  # noqa: S102
+
+        cls = ns['ComapeoMapBuilderAlgorithm']
+        algo = cls()
+        return algo
+
+    def _make_extent(self, west, south, east, north):
+        ext = _FakeRectangle(west, south, east, north)
+        ext.isEmpty = MagicMock(return_value=False)
+        return ext
+
+    def test_valid_params_pass(self):
+        """Valid zoom range + small extent should return (True, '')."""
+        algo = self._make_algorithm()
+        extent = self._make_extent(0, 0, 1, 1)
+        algo.parameterAsExtent = MagicMock(return_value=extent)
+        algo.parameterAsInt = MagicMock(side_effect=lambda p, k, c: 0 if k == 'MIN_ZOOM' else 5)
+        algo.parameterAsEnum = MagicMock(return_value=0)
+        algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
+
+        # Patch generator validations to pass silently
+        import comapeo_smp_generator as _gen_mod
+        with patch.object(_gen_mod.SMPGenerator, 'validate_tile_count',
+                          return_value=(10, None)), \
+             patch.object(_gen_mod.SMPGenerator, 'validate_disk_space'):
+            ok, msg = algo.checkParameterValues({}, MagicMock())
+
+        self.assertTrue(ok)
+        self.assertEqual(msg, '')
+
+    def test_inverted_zoom_range_blocked(self):
+        """min_zoom > max_zoom should be caught before touching the generator."""
+        algo = self._make_algorithm()
+        algo.parameterAsExtent = MagicMock(return_value=self._make_extent(0, 0, 1, 1))
+        algo.parameterAsInt = MagicMock(side_effect=lambda p, k, c: 10 if k == 'MIN_ZOOM' else 5)
+        algo.parameterAsEnum = MagicMock(return_value=0)
+        algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
+
+        ok, msg = algo.checkParameterValues({}, MagicMock())
+
+        self.assertFalse(ok)
+        self.assertIn('10', msg)   # min_zoom value in message
+        self.assertIn('5', msg)    # max_zoom value in message
+
+    def test_excessive_tile_count_blocked(self):
+        """Tile count above error threshold should block execution."""
+        algo = self._make_algorithm()
+        algo.parameterAsExtent = MagicMock(return_value=self._make_extent(-180, -85, 180, 85))
+        algo.parameterAsInt = MagicMock(side_effect=lambda p, k, c: 0 if k == 'MIN_ZOOM' else 18)
+        algo.parameterAsEnum = MagicMock(return_value=0)
+        algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
+
+        import comapeo_smp_generator as _gen_mod
+        with patch.object(_gen_mod.SMPGenerator, 'validate_tile_count',
+                          side_effect=ValueError('Estimated tile count (999999) exceeds maximum')):
+            ok, msg = algo.checkParameterValues({}, MagicMock())
+
+        self.assertFalse(ok)
+        self.assertIn('999999', msg)
+
+    def test_insufficient_disk_space_blocked(self):
+        """OSError from validate_disk_space should block execution."""
+        algo = self._make_algorithm()
+        algo.parameterAsExtent = MagicMock(return_value=self._make_extent(0, 0, 1, 1))
+        algo.parameterAsInt = MagicMock(side_effect=lambda p, k, c: 0 if k == 'MIN_ZOOM' else 5)
+        algo.parameterAsEnum = MagicMock(return_value=0)
+        algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
+
+        import comapeo_smp_generator as _gen_mod
+        with patch.object(_gen_mod.SMPGenerator, 'validate_tile_count',
+                          return_value=(100, None)), \
+             patch.object(_gen_mod.SMPGenerator, 'validate_disk_space',
+                          side_effect=OSError('Insufficient disk space. Estimated 500.0 MB needed')):
+            ok, msg = algo.checkParameterValues({}, MagicMock())
+
+        self.assertFalse(ok)
+        self.assertIn('Insufficient disk space', msg)
+
+    def test_empty_extent_skips_generator(self):
+        """An empty extent should not call the generator (return True to let processAlgorithm handle it)."""
+        algo = self._make_algorithm()
+        empty_ext = _FakeRectangle(0, 0, 0, 0)
+        empty_ext.isEmpty = MagicMock(return_value=True)
+        algo.parameterAsExtent = MagicMock(return_value=empty_ext)
+        algo.parameterAsInt = MagicMock(side_effect=lambda p, k, c: 0 if k == 'MIN_ZOOM' else 5)
+
+        ok, msg = algo.checkParameterValues({}, MagicMock())
+
+        self.assertTrue(ok)
+
+
 if __name__ == '__main__':
     unittest.main()

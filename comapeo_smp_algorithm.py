@@ -147,6 +147,55 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
             )
         )
 
+    def checkParameterValues(self, parameters, context):
+        """
+        Pre-flight validation called when the user clicks Run in the Processing dialog.
+        Returning (False, msg) blocks execution and shows msg as an error in the dialog.
+        This gives immediate feedback before the dialog closes, unlike processAlgorithm()
+        which only reports errors after the run has started.
+        """
+        # Let QGIS validate basic parameter types first
+        ok, msg = super().checkParameterValues(parameters, context)
+        if not ok:
+            return ok, msg
+
+        # Zoom range ordering
+        min_zoom = self.parameterAsInt(parameters, self.MIN_ZOOM, context)
+        max_zoom = self.parameterAsInt(parameters, self.MAX_ZOOM, context)
+        if min_zoom > max_zoom:
+            return False, self.tr(
+                'Minimum zoom level ({}) must not exceed maximum zoom level ({}).'.format(
+                    min_zoom, max_zoom)
+            )
+
+        # Retrieve extent — if unset, let processAlgorithm handle it
+        extent = self.parameterAsExtent(parameters, self.EXTENT, context)
+        if extent is None or extent.isEmpty():
+            return True, ''
+
+        # Tile format (needed for disk-space estimate)
+        tile_format_index = self.parameterAsEnum(parameters, self.TILE_FORMAT, context)
+        tile_format = self.TILE_FORMAT_OPTIONS[tile_format_index]
+
+        # Instantiate generator without feedback (logs go to QgsMessageLog only)
+        generator = SMPGenerator()
+
+        # Block on hard tile-count error (> TILE_COUNT_ERROR_THRESHOLD)
+        try:
+            tile_count, _warning = generator.validate_tile_count(extent, min_zoom, max_zoom)
+        except ValueError as exc:
+            return False, str(exc)
+
+        # Block if the output drive has insufficient space
+        output_file = self.parameterAsFileOutput(parameters, self.OUTPUT_FILE, context)
+        if output_file:
+            try:
+                generator.validate_disk_space(output_file, tile_count, tile_format)
+            except OSError as exc:
+                return False, str(exc)
+
+        return True, ''
+
     def processAlgorithm(self, parameters, context, feedback):
         """
         Here is where the processing itself takes place.
