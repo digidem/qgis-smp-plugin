@@ -25,8 +25,6 @@ from qgis.PyQt.QtGui import QImage, QPainter
 
 # Warn if estimated tile count exceeds this threshold
 TILE_COUNT_WARNING_THRESHOLD = 5000
-# Error if estimated tile count exceeds this threshold (too large to be practical)
-TILE_COUNT_ERROR_THRESHOLD = 50000
 # Estimated bytes per tile (PNG ~50 KB, JPG ~15 KB)
 BYTES_PER_TILE_PNG = 50 * 1024
 BYTES_PER_TILE_JPG = 15 * 1024
@@ -167,22 +165,14 @@ class SMPGenerator:
     def validate_tile_count(self, extent, min_zoom, max_zoom):
         """
         Check estimated tile count and return (count, warning_message).
-        Raises ValueError if count exceeds the hard error threshold.
 
         :param extent: QgsRectangle extent
         :param min_zoom: Minimum zoom level
         :param max_zoom: Maximum zoom level
         :return: Tuple of (tile_count, warning_message_or_None)
-        :raises ValueError: If tile count exceeds TILE_COUNT_ERROR_THRESHOLD
         """
         count = self.estimate_tile_count(extent, min_zoom, max_zoom)
         warning = None
-
-        if count > TILE_COUNT_ERROR_THRESHOLD:
-            raise ValueError(
-                f"Estimated tile count ({count:,}) exceeds the maximum allowed "
-                f"({TILE_COUNT_ERROR_THRESHOLD:,}). Please reduce the extent or zoom range."
-            )
 
         if count > TILE_COUNT_WARNING_THRESHOLD:
             warning = (

@@ -6,7 +6,7 @@
 name=CoMapeo Map Builder
 qgisMinimumVersion=3.0
 description=Generates SMP files for CoMapeo using proper XYZ Web Mercator tiling
-version=0.3.0
+version=0.4.0
 author=Awana Digital
 email=luandro@awana.digital
 
@@ -20,6 +20,9 @@ repository=https://github.com/digidem/qgis-smp-plugin
 
 hasProcessingProvider=yes
 changelog=
+    0.4.0 - Large map support & usability
+    * Remove hard tile count limit (was blocking large/offline map generation)
+    * Default tile format changed from PNG to JPG (smaller files, faster downloads)
     0.3.0 - Safety & image format features
     * Add PNG/JPG tile format selection parameter
     * Add JPEG quality setting (1-100)

@@ -118,7 +118,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                 self.TILE_FORMAT,
                 self.tr('Tile image format'),
                 options=self.TILE_FORMAT_OPTIONS,
-                defaultValue=0,  # PNG
+                defaultValue=1,  # JPG
                 optional=False
             )
         )
@@ -177,11 +177,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
         # Instantiate generator without feedback (logs go to QgsMessageLog only)
         generator = SMPGenerator()
 
-        # Block on hard tile-count error (> TILE_COUNT_ERROR_THRESHOLD)
-        try:
-            tile_count, _warning = generator.validate_tile_count(extent, min_zoom, max_zoom)
-        except ValueError as exc:
-            return False, str(exc)
+        tile_count, _warning = generator.validate_tile_count(extent, min_zoom, max_zoom)
 
         # Block if the output drive has insufficient space
         output_file = self.parameterAsFileOutput(parameters, self.OUTPUT_FILE, context)

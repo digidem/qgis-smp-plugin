@@ -116,7 +116,6 @@ from comapeo_smp_generator import (  # noqa: E402
     SMPGenerator,
     TileCache,
     TILE_COUNT_WARNING_THRESHOLD,
-    TILE_COUNT_ERROR_THRESHOLD,
     BYTES_PER_TILE_PNG,
     BYTES_PER_TILE_JPG,
     MIN_FREE_SPACE_BYTES,
@@ -275,14 +274,6 @@ class TestValidateTileCount(unittest.TestCase):
         count, warning = self.gen.validate_tile_count(extent, 0, 10)
         self.assertIsNotNone(warning)
         self.assertIn('Warning', warning)
-
-    def test_excessive_count_raises_error(self):
-        """Tile count above error threshold should raise ValueError."""
-        self.gen.estimate_tile_count = MagicMock(return_value=TILE_COUNT_ERROR_THRESHOLD + 1)
-        extent = self._make_extent(-180, -85, 180, 85)
-        with self.assertRaises(ValueError):
-            self.gen.validate_tile_count(extent, 0, 20)
-
 
 class TestValidateDiskSpace(unittest.TestCase):
     """Test disk space validation."""
@@ -864,22 +855,6 @@ class TestCheckParameterValues(unittest.TestCase):
         self.assertIn('10', msg)   # min_zoom value in message
         self.assertIn('5', msg)    # max_zoom value in message
 
-    def test_excessive_tile_count_blocked(self):
-        """Tile count above error threshold should block execution."""
-        algo = self._make_algorithm()
-        algo.parameterAsExtent = MagicMock(return_value=self._make_extent(-180, -85, 180, 85))
-        algo.parameterAsInt = MagicMock(side_effect=lambda p, k, c: 0 if k == 'MIN_ZOOM' else 18)
-        algo.parameterAsEnum = MagicMock(return_value=0)
-        algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
-
-        import comapeo_smp_generator as _gen_mod
-        with patch.object(_gen_mod.SMPGenerator, 'validate_tile_count',
-                          side_effect=ValueError('Estimated tile count (999999) exceeds maximum')):
-            ok, msg = algo.checkParameterValues({}, MagicMock())
-
-        self.assertFalse(ok)
-        self.assertIn('999999', msg)
-
     def test_insufficient_disk_space_blocked(self):
         """OSError from validate_disk_space should block execution."""
         algo = self._make_algorithm()
@@ -1066,24 +1041,6 @@ class TestErrorHandling(unittest.TestCase):
         for d in created_dirs:
             self.assertFalse(os.path.exists(d),
                              f"Temp dir {d} was not cleaned up after error")
-
-    def test_invalid_zoom_range_message_contains_values(self):
-        """checkParameterValues error message must include both zoom values."""
-        gen = SMPGenerator()
-        gen.estimate_tile_count = MagicMock(
-            return_value=TILE_COUNT_ERROR_THRESHOLD + 1
-        )
-        extent = _FakeRectangle(-180, -85, 180, 85)
-        gen._get_bounds_wgs84 = lambda e: [e.xMinimum(), e.yMinimum(),
-                                           e.xMaximum(), e.yMaximum()]
-        try:
-            gen.validate_tile_count(extent, 0, 20)
-            self.fail("Expected ValueError not raised")
-        except ValueError as exc:
-            msg = str(exc)
-            self.assertIn('Estimated tile count', msg)
-            self.assertIn('exceeds', msg)
-
 
 if __name__ == '__main__':
     unittest.main()
