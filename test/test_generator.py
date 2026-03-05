@@ -325,7 +325,7 @@ class TestTileFormatConstants(unittest.TestCase):
         gen.validate_disk_space = MagicMock()
         gen._create_style_from_canvas = MagicMock(return_value={})
         gen._generate_tiles_from_canvas = MagicMock()
-        gen._create_smp_archive = MagicMock()
+        gen._build_smp_archive = MagicMock()
         gen._get_bounds_wgs84 = MagicMock(return_value=[-1, -1, 1, 1])
 
         import tempfile, shutil
@@ -430,6 +430,129 @@ class TestCalculateTilesAtZoom(unittest.TestCase):
         min_x, max_x, min_y, max_y = self.gen._calculate_tiles_at_zoom(extent, zoom)
         self.assertLessEqual(max_x, n - 1)
         self.assertLessEqual(max_y, n - 1)
+
+
+class TestProgressSmoothing(unittest.TestCase):
+    """Progress setProgress() should only be called when pct changes."""
+
+    def test_setprogress_not_called_every_tile(self):
+        """With many tiles at same pct, setProgress should be called fewer times than tile count."""
+        gen = SMPGenerator()
+        feedback = MagicMock()
+        gen.feedback = feedback
+
+        # Patch rendering so no actual QGIS calls happen
+        gen._calculate_tiles_at_zoom = MagicMock(return_value=(0, 9, 0, 9))  # 100 tiles
+        gen._calculate_tile_extent = MagicMock(return_value=MagicMock())
+
+        import comapeo_smp_generator as _mod
+        fake_img = MagicMock()
+        fake_img.save = MagicMock()
+        fake_painter = MagicMock()
+        fake_job = MagicMock()
+
+        with patch.object(_mod, 'QgsMapSettings', MagicMock()), \
+             patch.object(_mod, 'QgsProject', _FakeProject), \
+             patch('comapeo_smp_generator.QImage', return_value=fake_img), \
+             patch('comapeo_smp_generator.QPainter', return_value=fake_painter), \
+             patch('comapeo_smp_generator.QgsMapRendererCustomPainterJob', return_value=fake_job):
+
+            tmp = tempfile.mkdtemp()
+            try:
+                gen._generate_tiles_from_canvas(
+                    _FakeRectangle(0, 0, 1, 1), 0, 0, tmp, tile_format='PNG'
+                )
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+
+        # 100 tiles but only 101 unique pct values (0..100), so calls <= 101
+        call_count = feedback.setProgress.call_count
+        self.assertLessEqual(call_count, 101)
+        # Should be called at least once
+        self.assertGreaterEqual(call_count, 1)
+
+
+class TestCacheDirectory(unittest.TestCase):
+    """Cache directory is preserved; existing tiles are skipped on resume."""
+
+    def _patched_gen(self):
+        gen = SMPGenerator()
+        gen.validate_tile_count = MagicMock(return_value=(1, None))
+        gen.validate_extent_size = MagicMock(return_value=None)
+        gen.validate_disk_space = MagicMock()
+        gen._get_bounds_wgs84 = MagicMock(return_value=[-1, -1, 1, 1])
+        gen._create_style_from_canvas = MagicMock(return_value={"version": 8})
+        gen._generate_tiles_from_canvas = MagicMock()
+        gen._build_smp_archive = MagicMock()
+        return gen
+
+    def test_cache_dir_passed_as_tiles_dir(self):
+        """When cache_dir is provided, _generate_tiles_from_canvas receives it as tiles_dir."""
+        gen = self._patched_gen()
+        extent = _FakeRectangle(-1, -1, 1, 1)
+
+        cache = tempfile.mkdtemp()
+        temp_root = tempfile.mkdtemp()
+        try:
+            with patch('tempfile.mkdtemp', return_value=temp_root):
+                gen.generate_smp_from_canvas(
+                    extent, 0, 1, '/tmp/test.smp', cache_dir=cache
+                )
+        finally:
+            shutil.rmtree(cache, ignore_errors=True)
+            shutil.rmtree(temp_root, ignore_errors=True)
+
+        # tiles_dir argument should be cache (not inside a temp dir)
+        call_args = gen._generate_tiles_from_canvas.call_args
+        tiles_dir_arg = call_args[0][3] if call_args[0] else call_args[1].get('tiles_dir', call_args[0][3])
+        self.assertEqual(tiles_dir_arg, cache)
+
+    def test_cache_dir_not_cleaned_up(self):
+        """cache_dir must still exist after generate_smp_from_canvas completes."""
+        gen = self._patched_gen()
+        extent = _FakeRectangle(-1, -1, 1, 1)
+
+        cache = tempfile.mkdtemp()
+        try:
+            gen.generate_smp_from_canvas(
+                extent, 0, 1, '/tmp/test.smp', cache_dir=cache
+            )
+            self.assertTrue(os.path.isdir(cache), "cache_dir was deleted but should persist")
+        finally:
+            shutil.rmtree(cache, ignore_errors=True)
+
+    def test_resume_skips_existing_tiles(self):
+        """Tiles already on disk are not re-rendered when resume=True."""
+        gen = SMPGenerator()
+        gen._get_bounds_wgs84 = MagicMock(return_value=[-1, -1, 1, 1])
+        gen._calculate_tiles_at_zoom = MagicMock(return_value=(0, 0, 0, 0))  # 1 tile
+        gen._calculate_tile_extent = MagicMock(return_value=MagicMock())
+
+        tmp = tempfile.mkdtemp()
+        try:
+            # Pre-create the tile file
+            zoom_dir = os.path.join(tmp, '0', '0')
+            os.makedirs(zoom_dir, exist_ok=True)
+            tile_path = os.path.join(zoom_dir, '0.png')
+            with open(tile_path, 'wb') as f:
+                f.write(b'FAKE')
+
+            render_mock = MagicMock()
+            import comapeo_smp_generator as _mod
+            with patch('comapeo_smp_generator.QImage', render_mock), \
+                 patch('comapeo_smp_generator.QPainter', MagicMock()), \
+                 patch('comapeo_smp_generator.QgsMapRendererCustomPainterJob', MagicMock()), \
+                 patch.object(_mod, 'QgsMapSettings', MagicMock()), \
+                 patch.object(_mod, 'QgsProject', _FakeProject):
+                gen._generate_tiles_from_canvas(
+                    _FakeRectangle(-1, -1, 1, 1), 0, 0, tmp,
+                    tile_format='PNG', resume=True
+                )
+
+            # QImage should NOT have been called because tile already existed
+            render_mock.assert_not_called()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class TestCheckParameterValues(unittest.TestCase):

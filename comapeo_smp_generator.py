@@ -197,7 +197,7 @@ class SMPGenerator:
         return None
 
     def generate_smp_from_canvas(self, extent, min_zoom, max_zoom, output_path,
-                                 tile_format=None, jpeg_quality=85):
+                                 tile_format=None, jpeg_quality=85, cache_dir=None):
         """
         Generate an SMP file from the current map canvas
 
@@ -208,6 +208,7 @@ class SMPGenerator:
         :param tile_format: Tile image format ('PNG' or 'JPG'). Defaults to 'PNG'.
         :param jpeg_quality: JPEG compression quality (1-100). Only used when
                              tile_format is 'JPG'. Defaults to 85.
+        :param cache_dir: Optional persistent directory for tile cache/resume
         :return: Path to the generated SMP file
         """
         if tile_format is None:
@@ -251,16 +252,24 @@ class SMPGenerator:
             with open(style_path, 'w') as f:
                 json.dump(style, f, indent=4)
 
-            # Generate tiles in the 's/0' directory
-            tiles_dir = os.path.join(style_dir, "0")
-            os.makedirs(tiles_dir, exist_ok=True)
+            if cache_dir is not None:
+                os.makedirs(cache_dir, exist_ok=True)
+                tiles_dir = cache_dir
+            else:
+                tiles_dir = os.path.join(style_dir, "0")
+                os.makedirs(tiles_dir, exist_ok=True)
             self._generate_tiles_from_canvas(
                 extent, min_zoom, max_zoom, tiles_dir,
-                tile_format=tile_format, jpeg_quality=jpeg_quality
+                tile_format=tile_format, jpeg_quality=jpeg_quality,
+                resume=(cache_dir is not None)
             )
 
             # Create the SMP file (zip archive)
-            self._create_smp_archive(temp_dir, output_path)
+            self._build_smp_archive(
+                style_path=os.path.join(temp_dir, "style.json"),
+                tiles_dir=tiles_dir,
+                output_path=output_path
+            )
 
             self.log(f"SMP file generated successfully: {output_path}")
             return output_path
@@ -376,7 +385,7 @@ class SMPGenerator:
         ]
 
     def _generate_tiles_from_canvas(self, extent, min_zoom, max_zoom, tiles_dir,
-                                    tile_format=None, jpeg_quality=85):
+                                    tile_format=None, jpeg_quality=85, resume=False):
         """
         Generate tiles from the current map canvas
 
@@ -386,6 +395,7 @@ class SMPGenerator:
         :param tiles_dir: Directory to save tiles
         :param tile_format: Tile image format ('PNG' or 'JPG')
         :param jpeg_quality: JPEG compression quality (1-100)
+        :param resume: Skip rendering for tiles already present in tiles_dir
         """
         if tile_format is None:
             tile_format = self.TILE_FORMAT_PNG
@@ -428,6 +438,7 @@ class SMPGenerator:
 
         # Generate tiles with cumulative progress
         tiles_completed = 0
+        last_reported_pct = -1
         for zoom, min_x, max_x, min_y, max_y, num_tiles in tiles_by_zoom:
             zoom_dir = os.path.join(tiles_dir, str(zoom))
             os.makedirs(zoom_dir, exist_ok=True)
@@ -443,6 +454,16 @@ class SMPGenerator:
                 os.makedirs(x_dir, exist_ok=True)
 
                 for y in range(min_y, max_y + 1):
+                    tile_path = os.path.join(x_dir, f"{y}.{tile_ext}")
+                    if resume and os.path.exists(tile_path):
+                        tiles_completed += 1
+                        if self.feedback and total_tiles > 0:
+                            new_pct = int((tiles_completed / total_tiles) * 100)
+                            if new_pct != last_reported_pct:
+                                self.feedback.setProgress(new_pct)
+                                last_reported_pct = new_pct
+                        continue
+
                     # Calculate the tile extent using proper XYZ bounds
                     tile_extent = self._calculate_tile_extent(x, y, zoom)
                     map_settings.setExtent(tile_extent)
@@ -463,7 +484,6 @@ class SMPGenerator:
                     painter.end()
 
                     # Save the tile
-                    tile_path = os.path.join(x_dir, f"{y}.{tile_ext}")
                     if tile_format == self.TILE_FORMAT_JPG:
                         img.save(tile_path, qt_format, jpeg_quality)
                     else:
@@ -472,11 +492,30 @@ class SMPGenerator:
                     tiles_completed += 1
 
                     # Update overall progress
-                    if self.feedback:
-                        progress = (tiles_completed / total_tiles) * 100
-                        self.feedback.setProgress(progress)
+                    if self.feedback and total_tiles > 0:
+                        new_pct = int((tiles_completed / total_tiles) * 100)
+                        if new_pct != last_reported_pct:
+                            self.feedback.setProgress(new_pct)
+                            last_reported_pct = new_pct
 
         self.log(f"Generated {tiles_completed} tiles from map canvas")
+
+    def _build_smp_archive(self, style_path, tiles_dir, output_path):
+        """
+        Create SMP archive using style.json and a tiles directory.
+
+        :param style_path: Path to style.json
+        :param tiles_dir: Directory containing z/x/y tiles
+        :param output_path: Output path for SMP archive
+        """
+        self.log(f"Creating SMP archive: {output_path}")
+        with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            zipf.write(style_path, 'style.json')
+            for root, _, files in os.walk(tiles_dir):
+                for file in files:
+                    fp = os.path.join(root, file)
+                    rel = os.path.relpath(fp, tiles_dir)
+                    zipf.write(fp, os.path.join('s', '0', rel))
 
     def _calculate_tile_extent(self, xtile, ytile, zoom):
         """
@@ -532,18 +571,3 @@ class SMPGenerator:
 
         return min_x, max_x, min_y, max_y
 
-    def _create_smp_archive(self, source_dir, output_path):
-        """
-        Create the SMP file (zip archive) from the source directory
-
-        :param source_dir: Source directory containing the SMP contents
-        :param output_path: Output path for the SMP file
-        """
-        self.log(f"Creating SMP archive: {output_path}")
-
-        with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for root, _, files in os.walk(source_dir):
-                for file in files:
-                    file_path = os.path.join(root, file)
-                    arcname = os.path.relpath(file_path, source_dir)
-                    zipf.write(file_path, arcname)
