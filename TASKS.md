@@ -25,12 +25,12 @@
   - *Details:* `_generate_tiles_from_canvas` tracks `last_reported_pct`; `feedback.setProgress()` called only when integer percentage changes. Committed e7b58e3.
 
 ## Long Term - Performance & Integration
-- [ ] **Background processing for large tile generations**
-  - *Details:* Generating tiles is CPU-intensive. Running it in the background prevents locking up the QGIS UI.
+- [x] **Background processing for large tile generations**
+  - *Details:* `SMPGeneratorTask(QgsTask)` added to `comapeo_smp_generator.py`; wraps `generate_smp_from_canvas` in a cancellable QGIS task, captures errors, logs completion. Use with `QgsApplication.taskManager().addTask(task)`.
 - [x] **Parallel tile rendering**
-  - *Details:* `_generate_tiles_from_canvas` now uses `ThreadPoolExecutor` with `max_workers` (default = CPU count). Each thread gets its own `QgsMapSettings` instance. Resume logic preserved in `_render_single_tile`. Committed alongside tile-grid preview.
-- [ ] **Incremental updates (only regenerate changed tiles)**
-  - *Details:* Extremely useful for large areas where only a small portion of the data changes frequently.
+  - *Details:* `_generate_tiles_from_canvas` uses `ThreadPoolExecutor` (default = CPU count); `_render_single_tile` owns per-thread `QgsMapSettings`. `max_workers` propagated through `generate_smp_from_canvas` and `SMPGeneratorTask`.
+- [x] **Incremental updates (only regenerate changed tiles)**
+  - *Details:* `TileCache` class stores per-tile config fingerprints (format + JPEG quality) in `_cache_meta.json`. Tiles reused when fingerprint matches; format/quality changes force re-render automatically.
 - [ ] **Direct integration with CoMapeo API**
   - *Details:* Seamless workflow allowing users to push maps directly to the device/server without manually moving files.
 

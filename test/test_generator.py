@@ -85,6 +85,19 @@ qgis_core_mock.Qgis = MagicMock()
 qgis_core_mock.Qgis.Info = 0
 qgis_core_mock.Qgis.Warning = 1
 qgis_core_mock.Qgis.Critical = 2
+
+
+class _FakeQgsTask:
+    CanCancel = 1
+
+    def __init__(self, description='', flags=0):
+        pass
+
+    def setProgress(self, p):
+        pass
+
+
+qgis_core_mock.QgsTask = _FakeQgsTask
 qgis_core_mock.QgsMessageLog = MagicMock()
 qgis_core_mock.QgsMapSettings = MagicMock()
 qgis_core_mock.QgsMapRendererCustomPainterJob = MagicMock()
@@ -101,12 +114,100 @@ sys.modules['qgis.PyQt.QtGui'] = pyqt_gui_mock
 # Now import the generator (QGIS not needed for pure-logic methods)
 from comapeo_smp_generator import (  # noqa: E402
     SMPGenerator,
+    SMPGeneratorTask,
+    TileCache,
     TILE_COUNT_WARNING_THRESHOLD,
     TILE_COUNT_ERROR_THRESHOLD,
     BYTES_PER_TILE_PNG,
     BYTES_PER_TILE_JPG,
     MIN_FREE_SPACE_BYTES,
 )
+
+
+class TestTileCache(unittest.TestCase):
+    """TileCache fingerprint-based invalidation."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.cache = TileCache(self.tmp)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_fresh_returns_false_when_no_entry(self):
+        fp = TileCache.make_fingerprint('PNG', 85)
+        self.assertFalse(self.cache.is_fresh(0, 0, 0, fp))
+
+    def test_mark_then_fresh(self):
+        fp = TileCache.make_fingerprint('PNG', 85)
+        self.cache.mark(0, 0, 0, fp)
+        self.assertTrue(self.cache.is_fresh(0, 0, 0, fp))
+
+    def test_fingerprint_mismatch_not_fresh(self):
+        self.cache.mark(0, 0, 0, TileCache.make_fingerprint('PNG', 85))
+        self.assertFalse(self.cache.is_fresh(0, 0, 0, TileCache.make_fingerprint('JPG', 75)))
+
+    def test_invalidate_removes_entry(self):
+        fp = TileCache.make_fingerprint('PNG', 85)
+        self.cache.mark(0, 0, 0, fp)
+        self.cache.invalidate(0, 0, 0)
+        self.assertFalse(self.cache.is_fresh(0, 0, 0, fp))
+
+    def test_meta_persists_across_instances(self):
+        fp = TileCache.make_fingerprint('PNG', 85)
+        self.cache.mark(1, 2, 3, fp)
+        cache2 = TileCache(self.tmp)
+        self.assertTrue(cache2.is_fresh(1, 2, 3, fp))
+
+    def test_fingerprint_includes_format_and_quality(self):
+        fp1 = TileCache.make_fingerprint('PNG', 85)
+        fp2 = TileCache.make_fingerprint('JPG', 85)
+        fp3 = TileCache.make_fingerprint('PNG', 75)
+        self.assertNotEqual(fp1, fp2)
+        self.assertNotEqual(fp1, fp3)
+        self.assertNotEqual(fp2, fp3)
+
+
+class TestSMPGeneratorTask(unittest.TestCase):
+    """SMPGeneratorTask stores parameters and exposes run/finished interface."""
+
+    def _make_task(self):
+        extent = _FakeRectangle(0, 0, 1, 1)
+        return SMPGeneratorTask(extent, 0, 5, '/tmp/out.smp',
+                                tile_format='PNG', jpeg_quality=85)
+
+    def test_task_stores_params(self):
+        task = self._make_task()
+        self.assertEqual(task.min_zoom, 0)
+        self.assertEqual(task.max_zoom, 5)
+        self.assertEqual(task.tile_format, 'PNG')
+        self.assertEqual(task.jpeg_quality, 85)
+        self.assertEqual(task.output_path, '/tmp/out.smp')
+
+    def test_task_run_calls_generator(self):
+        import comapeo_smp_generator as _mod
+        extent = _FakeRectangle(0, 0, 1, 1)
+        task = SMPGeneratorTask(extent, 0, 5, '/tmp/out.smp')
+
+        with patch.object(_mod.SMPGenerator, 'generate_smp_from_canvas',
+                          return_value='/tmp/out.smp') as mock_gen:
+            result = task.run()
+
+        self.assertTrue(result)
+        self.assertEqual(task.result_path, '/tmp/out.smp')
+        mock_gen.assert_called_once()
+
+    def test_task_run_captures_error(self):
+        import comapeo_smp_generator as _mod
+        extent = _FakeRectangle(0, 0, 1, 1)
+        task = SMPGeneratorTask(extent, 0, 5, '/tmp/out.smp')
+
+        with patch.object(_mod.SMPGenerator, 'generate_smp_from_canvas',
+                          side_effect=ValueError('bad params')):
+            result = task.run()
+
+        self.assertFalse(result)
+        self.assertIn('bad params', task.error)
 
 
 class TestDeg2Num(unittest.TestCase):

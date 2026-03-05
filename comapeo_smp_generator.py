@@ -36,6 +36,122 @@ BYTES_PER_TILE_JPG = 15 * 1024
 MIN_FREE_SPACE_BYTES = 100 * 1024 * 1024
 
 
+class TileCache:
+    """
+    Manages a persistent tile cache with config-based invalidation.
+
+    A JSON sidecar file (`_cache_meta.json`) in `cache_dir` stores a dict
+    mapping tile keys ("z/x/y") to the config fingerprint used when that
+    tile was last rendered. If the fingerprint for the current run differs,
+    the tile is treated as stale and re-rendered.
+    """
+
+    META_FILE = '_cache_meta.json'
+
+    def __init__(self, cache_dir):
+        self.cache_dir = cache_dir
+        self._meta_path = os.path.join(cache_dir, self.META_FILE)
+        self._meta = self._load()
+
+    def _load(self):
+        if os.path.exists(self._meta_path):
+            try:
+                with open(self._meta_path) as fh:
+                    return json.load(fh)
+            except (json.JSONDecodeError, OSError):
+                return {}
+        return {}
+
+    def _save(self):
+        with open(self._meta_path, 'w') as fh:
+            json.dump(self._meta, fh)
+
+    @staticmethod
+    def make_fingerprint(tile_format, jpeg_quality):
+        """Return a string that identifies the generation config."""
+        return f"{tile_format}:{jpeg_quality}"
+
+    def is_fresh(self, zoom, x, y, fingerprint):
+        """Return True if the cached tile matches the current fingerprint."""
+        key = f"{zoom}/{x}/{y}"
+        return self._meta.get(key) == fingerprint
+
+    def mark(self, zoom, x, y, fingerprint):
+        """Record that tile (zoom, x, y) was rendered with this fingerprint."""
+        key = f"{zoom}/{x}/{y}"
+        self._meta[key] = fingerprint
+        self._save()
+
+    def invalidate(self, zoom, x, y):
+        """Remove a tile's fingerprint so it will be re-rendered next run."""
+        key = f"{zoom}/{x}/{y}"
+        self._meta.pop(key, None)
+        self._save()
+
+
+class SMPGeneratorTask(QgsTask):
+    """
+    QgsTask wrapper for non-blocking SMP generation.
+
+    Usage:
+        task = SMPGeneratorTask(
+            extent, min_zoom, max_zoom, output_path,
+            tile_format='PNG', jpeg_quality=85, cache_dir=None
+        )
+        QgsApplication.taskManager().addTask(task)
+    """
+
+    def __init__(self, extent, min_zoom, max_zoom, output_path,
+                 tile_format='PNG', jpeg_quality=85, cache_dir=None,
+                 max_workers=None):
+        super().__init__('Generate SMP', QgsTask.CanCancel)
+        self.extent = extent
+        self.min_zoom = min_zoom
+        self.max_zoom = max_zoom
+        self.output_path = output_path
+        self.tile_format = tile_format
+        self.jpeg_quality = jpeg_quality
+        self.cache_dir = cache_dir
+        self.max_workers = max_workers
+        self.result_path = None
+        self.error = None
+
+    def run(self):
+        """Called by QGIS task manager in a background thread."""
+        try:
+            generator = SMPGenerator(feedback=self)
+            self.result_path = generator.generate_smp_from_canvas(
+                self.extent, self.min_zoom, self.max_zoom, self.output_path,
+                tile_format=self.tile_format,
+                jpeg_quality=self.jpeg_quality,
+                cache_dir=self.cache_dir,
+                max_workers=self.max_workers,
+            )
+            return True
+        except Exception as exc:
+            self.error = str(exc)
+            return False
+
+    def finished(self, result):
+        """Called in the main thread after run() completes."""
+        if result:
+            QgsMessageLog.logMessage(
+                f'SMP generation complete: {self.result_path}',
+                'CoMapeo SMP Generator', Qgis.Info
+            )
+        else:
+            QgsMessageLog.logMessage(
+                f'SMP generation failed: {self.error}',
+                'CoMapeo SMP Generator', Qgis.Critical
+            )
+
+    def pushInfo(self, message):
+        pass
+
+    def setProgress(self, progress):
+        super().setProgress(progress)
+
+
 class SMPGenerator:
     """
     Class to generate SMP (Styled Map Package) files for CoMapeo
@@ -228,7 +344,8 @@ class SMPGenerator:
         return rects
 
     def generate_smp_from_canvas(self, extent, min_zoom, max_zoom, output_path,
-                                 tile_format=None, jpeg_quality=85, cache_dir=None):
+                                 tile_format=None, jpeg_quality=85, cache_dir=None,
+                                 max_workers=None):
         """
         Generate an SMP file from the current map canvas
 
@@ -240,6 +357,7 @@ class SMPGenerator:
         :param jpeg_quality: JPEG compression quality (1-100). Only used when
                              tile_format is 'JPG'. Defaults to 85.
         :param cache_dir: Optional persistent directory for tile cache/resume
+        :param max_workers: Number of thread workers. None uses CPU count.
         :return: Path to the generated SMP file
         """
         if tile_format is None:
@@ -286,14 +404,17 @@ class SMPGenerator:
             if cache_dir is not None:
                 os.makedirs(cache_dir, exist_ok=True)
                 tiles_dir = cache_dir
+                tile_cache = TileCache(cache_dir)
             else:
                 tiles_dir = os.path.join(style_dir, "0")
                 os.makedirs(tiles_dir, exist_ok=True)
+                tile_cache = None
             self._generate_tiles_from_canvas(
                 extent, min_zoom, max_zoom, tiles_dir,
                 tile_format=tile_format, jpeg_quality=jpeg_quality,
                 resume=(cache_dir is not None),
-                max_workers=None
+                max_workers=max_workers,
+                tile_cache=tile_cache
             )
 
             # Create the SMP file (zip archive)
@@ -417,7 +538,8 @@ class SMPGenerator:
         ]
 
     def _render_single_tile(self, map_settings_template, zoom, x, y, tiles_dir,
-                            tile_format, jpeg_quality, resume):
+                            tile_format, jpeg_quality, resume,
+                            tile_cache=None, fingerprint=None):
         """
         Render a single tile and save it to disk.
 
@@ -429,6 +551,8 @@ class SMPGenerator:
         :param tile_format: Tile image format ('PNG' or 'JPG')
         :param jpeg_quality: JPEG compression quality (1-100)
         :param resume: Skip rendering if tile already exists
+        :param tile_cache: Optional TileCache for freshness checks and updates
+        :param fingerprint: Current generation fingerprint
         :return: True if rendered, False if skipped
         """
         tile_ext = 'jpg' if tile_format == self.TILE_FORMAT_JPG else 'png'
@@ -439,7 +563,8 @@ class SMPGenerator:
         tile_path = os.path.join(x_dir, f"{y}.{tile_ext}")
 
         if resume and os.path.exists(tile_path):
-            return False
+            if tile_cache is None or tile_cache.is_fresh(zoom, x, y, fingerprint):
+                return False
 
         tile_extent = self._calculate_tile_extent(x, y, zoom)
 
@@ -469,11 +594,14 @@ class SMPGenerator:
         else:
             img.save(tile_path, qt_format)
 
+        if tile_cache is not None:
+            tile_cache.mark(zoom, x, y, fingerprint)
+
         return True
 
     def _generate_tiles_from_canvas(self, extent, min_zoom, max_zoom, tiles_dir,
                                     tile_format=None, jpeg_quality=85, resume=False,
-                                    max_workers=None):
+                                    max_workers=None, tile_cache=None):
         """
         Generate tiles from the current map canvas
 
@@ -485,11 +613,13 @@ class SMPGenerator:
         :param jpeg_quality: JPEG compression quality (1-100)
         :param resume: Skip rendering for tiles already present in tiles_dir
         :param max_workers: Number of thread workers. None uses CPU count.
+        :param tile_cache: Optional TileCache for incremental invalidation
         """
         if tile_format is None:
             tile_format = self.TILE_FORMAT_PNG
 
         tile_format = tile_format.upper()
+        fingerprint = TileCache.make_fingerprint(tile_format, jpeg_quality)
 
         self.log("Generating tiles from map canvas...")
 
@@ -546,7 +676,8 @@ class SMPGenerator:
                 executor.submit(
                     self._render_single_tile,
                     map_settings, zoom, x, y, tiles_dir,
-                    tile_format, jpeg_quality, resume
+                    tile_format, jpeg_quality, resume,
+                    tile_cache, fingerprint
                 ): (zoom, x, y)
                 for zoom, x, y in tile_tasks
             }
