@@ -50,6 +50,8 @@ class ComapeoMapBuilderPlugin(object):
 
     def initProcessing(self):
         """Init Processing provider for QGIS >= 3.8."""
+        if self.provider is not None:
+            return  # guard against duplicate initialisation
         self.provider = ComapeoMapBuilderProvider()
         QgsApplication.processingRegistry().addProvider(self.provider)
 
@@ -57,4 +59,6 @@ class ComapeoMapBuilderPlugin(object):
         self.initProcessing()
 
     def unload(self):
-        QgsApplication.processingRegistry().removeProvider(self.provider)
+        if self.provider is not None:
+            QgsApplication.processingRegistry().removeProvider(self.provider)
+            self.provider = None

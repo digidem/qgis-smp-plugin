@@ -4,7 +4,10 @@ This QGIS plugin generates Styled Map Package (SMP) files for use with CoMapeo, 
 
 ## What is an SMP file?
 
-A Styled Map Package (`.smp`) file is a Zip archive containing all the resources needed to serve a Maplibre vector styled map offline. This includes the style JSON, vector and raster tiles, glyphs (fonts), the sprite image, and the sprite metadata.
+A Styled Map Package (`.smp`) file is a Zip archive containing a `style.json`
+(MapLibre GL style descriptor) and a set of raster XYZ tiles rendered from
+your QGIS project.  The plugin generates raster tiles only — it does not
+produce vector tiles, glyphs, or sprite assets.
 
 ## Installation
 
@@ -13,7 +16,7 @@ A Styled Map Package (`.smp`) file is a Zip archive containing all the resources
 1. Open QGIS
 2. Go to `Plugins` > `Manage and Install Plugins...`
 3. Select the `All` tab
-4. Search for "CoMapeo SMP"
+4. Search for "CoMapeo Map Builder"
 5. Click `Install Plugin`
 6. The plugin will be installed and activated automatically
 
@@ -43,7 +46,7 @@ A Styled Map Package (`.smp`) file is a Zip archive containing all the resources
 
 1. Open QGIS and load the layers you want to include in your SMP file
 2. Style your layers as desired in the QGIS map canvas
-3. Go to `Processing` > `Toolbox` and search for "CoMapeo SMP"
+3. Go to `Processing` > `Toolbox` and search for "CoMapeo Map Builder"
 4. Select the "Generate SMP Map" tool
 5. Configure the following parameters:
    - **Extent**: The geographic area to include in the SMP file
@@ -81,7 +84,13 @@ make package VERSION=X.Y.Z
 ### Running Tests
 
 ```bash
-# Run the tests
+# Reliable QGIS-free logic tests (use this for local verification):
+make test-logic
+# or equivalently:
+PYTHONPATH=. python3 test/test_generator.py
+
+# Legacy full test suite (requires QGIS Python env + nosetests;
+# exits 0 even when tests fail — do not rely on this in CI):
 make test
 ```
 
