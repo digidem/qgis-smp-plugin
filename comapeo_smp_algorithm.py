@@ -172,6 +172,10 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
 
         # Tile format (needed for disk-space estimate)
         tile_format_index = self.parameterAsEnum(parameters, self.TILE_FORMAT, context)
+        if tile_format_index < 0 or tile_format_index >= len(self.TILE_FORMAT_OPTIONS):
+            return False, self.tr(
+                'Invalid tile format index: {}'.format(tile_format_index)
+            )
         tile_format = self.TILE_FORMAT_OPTIONS[tile_format_index]
 
         # Instantiate generator without feedback (logs go to QgsMessageLog only)
@@ -203,6 +207,10 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
 
         # Get tile format
         tile_format_index = self.parameterAsEnum(parameters, self.TILE_FORMAT, context)
+        if tile_format_index < 0 or tile_format_index >= len(self.TILE_FORMAT_OPTIONS):
+            raise QgsProcessingException(
+                self.tr('Invalid tile format index: {}'.format(tile_format_index))
+            )
         tile_format = self.TILE_FORMAT_OPTIONS[tile_format_index]
 
         # Get JPEG quality

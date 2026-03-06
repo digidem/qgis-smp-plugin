@@ -14,8 +14,6 @@ from qgis.core import (
     QgsRectangle,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
-    QgsRasterLayer,
-    QgsVectorLayer,
     QgsMessageLog,
     Qgis,
     QgsMapRendererCustomPainterJob
@@ -79,7 +77,11 @@ class TileCache:
         self._save()
 
     def invalidate(self, zoom, x, y):
-        """Remove a tile's fingerprint so it will be re-rendered next run."""
+        """Remove a tile's fingerprint so it will be re-rendered next run.
+
+        Not used internally; kept for external callers that need to force
+        re-rendering of a specific tile (e.g. after source data changes).
+        """
         key = f"{zoom}/{x}/{y}"
         self._meta.pop(key, None)
         self._save()
@@ -387,8 +389,8 @@ class SMPGenerator:
         center_lon = (bounds[0] + bounds[2]) / 2
         center_lat = (bounds[1] + bounds[3]) / 2
 
-        # Calculate appropriate default zoom
-        default_zoom = min(max_zoom - 2, 11)
+        # Calculate appropriate default zoom (must be >= 0)
+        default_zoom = max(0, min(max_zoom - 2, 11))
 
         # Create a basic style following the bash script reference
         source_id = "mbtiles-source"
