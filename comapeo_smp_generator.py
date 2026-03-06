@@ -365,11 +365,28 @@ class SMPGenerator:
                 tile_cache=tile_cache
             )
 
+            # Build the set of tile paths that belong to *this* export so that
+            # stale tiles from previous runs are excluded from the archive.
+            # Only needed when cache_dir is used (otherwise tiles_dir is fresh).
+            tile_paths = None
+            if cache_dir is not None:
+                tile_ext = 'jpg' if tile_format == self.TILE_FORMAT_JPG else 'png'
+                tile_paths = set()
+                for zoom in range(min_zoom, max_zoom + 1):
+                    ranges = self._calculate_tiles_at_zoom(extent, zoom)
+                    for min_x, max_x, min_y, max_y in ranges:
+                        for x in range(min_x, max_x + 1):
+                            for y in range(min_y, max_y + 1):
+                                tile_paths.add(
+                                    f"{zoom}/{x}/{y}.{tile_ext}"
+                                )
+
             # Create the SMP file (zip archive)
             self._build_smp_archive(
                 style_path=os.path.join(temp_dir, "style.json"),
                 tiles_dir=tiles_dir,
-                output_path=output_path
+                output_path=output_path,
+                tile_paths=tile_paths
             )
 
             self.log(f"SMP file generated successfully: {output_path}")
@@ -651,22 +668,34 @@ class SMPGenerator:
 
         self.log(f"Generated {tiles_completed} tiles from map canvas")
 
-    def _build_smp_archive(self, style_path, tiles_dir, output_path):
+    def _build_smp_archive(self, style_path, tiles_dir, output_path,
+                           tile_paths=None):
         """
         Create SMP archive using style.json and a tiles directory.
 
         :param style_path: Path to style.json
         :param tiles_dir: Directory containing z/x/y tiles
         :param output_path: Output path for SMP archive
+        :param tile_paths: Optional set of relative tile paths (using '/' as
+            separator) that belong to the current export.  When provided, only
+            tiles in this set are included and internal cache metadata files
+            are always excluded.  When None, all tile files are included
+            (minus cache metadata).
         """
         self.log(f"Creating SMP archive: {output_path}")
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             zipf.write(style_path, 'style.json')
             for root, _, files in os.walk(tiles_dir):
                 for file in files:
+                    # Never package internal cache metadata
+                    if file == TileCache.META_FILE:
+                        continue
                     fp = os.path.join(root, file)
-                    rel = os.path.relpath(fp, tiles_dir)
-                    zipf.write(fp, 's/0/' + rel.replace(os.sep, '/'))
+                    rel = os.path.relpath(fp, tiles_dir).replace(os.sep, '/')
+                    # When a tile manifest is provided, skip stale tiles
+                    if tile_paths is not None and rel not in tile_paths:
+                        continue
+                    zipf.write(fp, 's/0/' + rel)
 
     def _calculate_tile_extent(self, xtile, ytile, zoom):
         """
