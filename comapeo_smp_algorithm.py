@@ -256,6 +256,12 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
         except (ValueError, OSError) as e:
             raise QgsProcessingException(str(e))
 
+        # generate_smp_from_canvas returns None when the user cancelled.
+        # Return an empty result dict so Processing surfaces it as cancelled,
+        # not as a successful run with an empty output.
+        if output_path is None:
+            return {}
+
         # Return the results
         return {self.OUTPUT_FILE: output_path}
 

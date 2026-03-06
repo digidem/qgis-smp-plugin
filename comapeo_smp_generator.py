@@ -365,6 +365,12 @@ class SMPGenerator:
                 tile_cache=tile_cache
             )
 
+            # If the user cancelled during tile generation, do not produce a
+            # partial archive.  Return None to signal cancellation to callers.
+            if self.feedback and self.feedback.isCanceled():
+                self.log("Generation cancelled — no SMP archive created.")
+                return None
+
             # Build the set of tile paths that belong to *this* export so that
             # stale tiles from previous runs are excluded from the archive.
             # Only needed when cache_dir is used (otherwise tiles_dir is fresh).
@@ -390,7 +396,7 @@ class SMPGenerator:
             )
 
             self.log(f"SMP file generated successfully: {output_path}")
-            return output_path
+            return output_path  # type: ignore[return-value]
 
         except Exception as e:
             self.log(f"Error generating SMP file: {str(e)}", Qgis.Critical)
@@ -504,7 +510,8 @@ class SMPGenerator:
 
     def _render_single_tile(self, map_settings_template, zoom, x, y, tiles_dir,
                             tile_format, jpeg_quality, resume,
-                            tile_cache=None, fingerprint=None):
+                            tile_cache=None, fingerprint=None,
+                            cancel_event=None):
         """
         Render a single tile and save it to disk.
 
@@ -518,8 +525,13 @@ class SMPGenerator:
         :param resume: Skip rendering if tile already exists
         :param tile_cache: Optional TileCache for freshness checks and updates
         :param fingerprint: Current generation fingerprint
-        :return: True if rendered, False if skipped
+        :param cancel_event: Optional threading.Event; if set, skip rendering
+        :return: True if rendered, False if skipped or cancelled
         """
+        # Bail out immediately if cancellation has been signalled
+        if cancel_event is not None and cancel_event.is_set():
+            return False
+
         tile_ext = 'jpg' if tile_format == self.TILE_FORMAT_JPG else 'png'
         qt_format = 'JPEG' if tile_format == self.TILE_FORMAT_JPG else 'PNG'
 
@@ -595,11 +607,15 @@ class SMPGenerator:
         map_settings = QgsMapSettings()
         map_settings.setDestinationCrs(project.crs())
 
-        # Add all visible layers from the project
-        layers = project.mapLayers().values()
+        # Add visible layers in layer-tree order (matches what users see in the
+        # QGIS layer panel) so that rendering is deterministic across Processing
+        # contexts.  findLayers() returns QgsLayerTreeLayer nodes top-to-bottom;
+        # the first node is the topmost layer and is rendered on top.
+        root = project.layerTreeRoot()
         visible_layers = [
-            layer for layer in layers
-            if project.layerTreeRoot().findLayer(layer.id()).isVisible()
+            node.layer()
+            for node in root.findLayers()
+            if node.isVisible() and node.layer() is not None
         ]
         map_settings.setLayers(visible_layers)
 
@@ -634,28 +650,39 @@ class SMPGenerator:
 
         tiles_completed = 0
         last_reported_pct = -1
-        lock = threading.Lock()
+        progress_lock = threading.Lock()
+        cancel_event = threading.Event()
         effective_workers = max_workers if max_workers is not None else os.cpu_count() or 1
 
         if self.feedback and total_tiles > 0:
             self.feedback.setProgress(0)
 
         with ThreadPoolExecutor(max_workers=effective_workers) as executor:
-            futures = {
-                executor.submit(
+            # Submit futures lazily so we can stop before queueing all tiles
+            # when cancellation is requested.
+            futures = {}
+            for zoom, x, y in tile_tasks:
+                if self.feedback and self.feedback.isCanceled():
+                    cancel_event.set()
+                    break
+                f = executor.submit(
                     self._render_single_tile,
                     map_settings, zoom, x, y, tiles_dir,
                     tile_format, jpeg_quality, resume,
-                    tile_cache, fingerprint
-                ): (zoom, x, y)
-                for zoom, x, y in tile_tasks
-            }
+                    tile_cache, fingerprint, cancel_event
+                )
+                futures[f] = (zoom, x, y)
 
             for future in as_completed(futures):
                 future.result()
-                with lock:
+                with progress_lock:
                     tiles_completed += 1
                     if self.feedback and self.feedback.isCanceled():
+                        # Signal all running workers to abort and cancel any
+                        # futures that have not started yet.
+                        cancel_event.set()
+                        for f in futures:
+                            f.cancel()
                         break
                     if self.feedback and total_tiles > 0:
                         new_pct = int((tiles_completed / total_tiles) * 100)
