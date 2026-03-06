@@ -1264,6 +1264,10 @@ class TestTileCacheThreadSafety(unittest.TestCase):
             cache_a.flush()
             cache_b.flush()
             self.assertEqual(errors, [], f"Errors during multi-instance mark: {errors}")
+            cache_c = TileCache(tmp)
+            for i in range(20):
+                self.assertTrue(cache_c.is_fresh(0, i, 0, fp))
+                self.assertTrue(cache_c.is_fresh(0, i + 100, 0, fp))
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
