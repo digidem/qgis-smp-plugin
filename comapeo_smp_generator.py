@@ -4,9 +4,11 @@ import os
 import json
 import math
 import threading
+import hashlib
 import shutil
 import zipfile
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from qgis.core import (
     QgsProject,
@@ -41,12 +43,22 @@ class TileCache:
     """
 
     META_FILE = '_cache_meta.json'
+    _path_locks = {}
+    _path_locks_guard = threading.Lock()
 
     def __init__(self, cache_dir):
         self.cache_dir = cache_dir
         self._meta_path = os.path.join(cache_dir, self.META_FILE)
-        self._lock = threading.Lock()
+        self._lock = self._lock_for_path(self._meta_path)
         self._meta = self._load()
+        self._dirty = False
+
+    @classmethod
+    def _lock_for_path(cls, path):
+        with cls._path_locks_guard:
+            if path not in cls._path_locks:
+                cls._path_locks[path] = threading.Lock()
+            return cls._path_locks[path]
 
     def _load(self):
         if os.path.exists(self._meta_path):
@@ -72,16 +84,18 @@ class TileCache:
             raise
 
     @staticmethod
-    def make_fingerprint(tile_format, jpeg_quality):
+    def make_fingerprint(tile_format, jpeg_quality, *extra_parts):
         """Return a string that identifies the generation config."""
-        return f"{tile_format}:{jpeg_quality}"
+        parts = [str(tile_format), str(jpeg_quality)]
+        parts.extend(str(part) for part in extra_parts if part not in (None, ''))
+        return ':'.join(parts)
 
     def is_fresh(self, zoom, x, y, fingerprint):
         """Return True if the cached tile matches the current fingerprint."""
         key = f"{zoom}/{x}/{y}"
         return self._meta.get(key) == fingerprint
 
-    def mark(self, zoom, x, y, fingerprint):
+    def mark(self, zoom, x, y, fingerprint, defer_save=False):
         """Record that tile (zoom, x, y) was rendered with this fingerprint.
 
         Thread-safe: acquires the instance lock before mutating shared state.
@@ -89,19 +103,34 @@ class TileCache:
         key = f"{zoom}/{x}/{y}"
         with self._lock:
             self._meta[key] = fingerprint
-            self._save()
+            if defer_save:
+                self._dirty = True
+            else:
+                self._save()
+                self._dirty = False
 
-    def invalidate(self, zoom, x, y):
-        """Remove a tile's fingerprint so it will be re-rendered next run.
+    def invalidate(self, zoom, x, y, defer_save=False):
+        """Remove a tile fingerprint so a future run will re-render it.
 
-        Not used internally; kept for external callers that need to force
-        re-rendering of a specific tile (e.g. after source data changes).
-        Thread-safe: acquires the instance lock before mutating shared state.
+        This helper is not used internally today, but it is retained for
+        cache-management callers and tests. Thread-safe: acquires the instance
+        lock before mutating shared state.
         """
         key = f"{zoom}/{x}/{y}"
         with self._lock:
             self._meta.pop(key, None)
-            self._save()
+            if defer_save:
+                self._dirty = True
+            else:
+                self._save()
+                self._dirty = False
+
+    def flush(self):
+        """Persist deferred metadata updates, if any."""
+        with self._lock:
+            if self._dirty:
+                self._save()
+                self._dirty = False
 
 
 
@@ -234,12 +263,12 @@ class SMPGenerator:
                 f"but only {free_bytes / (1024*1024):.1f} MB available on disk."
             )
 
-    def validate_extent_size(self, extent, min_zoom, max_zoom):
+    def validate_extent_size(self, extent, _min_zoom, max_zoom):
         """
         Warn if the extent+zoom combination is unreasonably large.
 
         :param extent: QgsRectangle extent in project CRS
-        :param min_zoom: Minimum zoom level
+        :param _min_zoom: Minimum zoom level (reserved for future heuristics)
         :param max_zoom: Maximum zoom level
         :return: Warning message string, or None if extent is acceptable
         """
@@ -264,6 +293,9 @@ class SMPGenerator:
     def get_tile_grid_rects(self, extent, min_zoom, max_zoom):
         """
         Return the WGS84 bounding rectangles of all tiles that would be generated.
+
+        This helper is kept for preview/debug workflows and tests even though
+        the current QGIS UI does not yet expose a tile-grid preview.
 
         :param extent: QgsRectangle extent in project CRS
         :param min_zoom: Minimum zoom level
@@ -364,6 +396,8 @@ class SMPGenerator:
                 max_workers=max_workers,
                 tile_cache=tile_cache
             )
+            if tile_cache is not None:
+                tile_cache.flush()
 
             # If the user cancelled during tile generation, do not produce a
             # partial archive.  Return None to signal cancellation to callers.
@@ -388,12 +422,15 @@ class SMPGenerator:
                                 )
 
             # Create the SMP file (zip archive)
-            self._build_smp_archive(
+            archive_built = self._build_smp_archive(
                 style_path=os.path.join(temp_dir, "style.json"),
                 tiles_dir=tiles_dir,
                 output_path=output_path,
                 tile_paths=tile_paths
             )
+            if not archive_built:
+                self.log("Generation cancelled during archive creation — no SMP archive created.")
+                return None
 
             self.log(f"SMP file generated successfully: {output_path}")
             return output_path  # type: ignore[return-value]
@@ -429,8 +466,11 @@ class SMPGenerator:
         center_lon = (bounds[0] + bounds[2]) / 2
         center_lat = (bounds[1] + bounds[3]) / 2
 
-        # Calculate appropriate default zoom (must be >= 0)
-        default_zoom = max(0, min(max_zoom - 2, 11))
+        # Keep the initial zoom within the available source range.
+        default_zoom = min(
+            max_zoom,
+            max(max(min_zoom, 0), min(max_zoom - 2, 11))
+        )
 
         # Create a basic style following the bash script reference
         source_id = "mbtiles-source"
@@ -508,6 +548,102 @@ class SMPGenerator:
             wgs84_extent.yMaximum()
         ]
 
+    @staticmethod
+    def _safe_call(obj, method_name):
+        method = getattr(obj, method_name, None)
+        if not callable(method):
+            return None
+        try:
+            return method()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _source_mtime(source):
+        if not source:
+            return None
+        local_path = source.split('|', 1)[0]
+        if os.path.exists(local_path):
+            try:
+                return os.path.getmtime(local_path)
+            except OSError:
+                return None
+        return None
+
+    def _layer_cache_key(self, layer):
+        parts = []
+        for name in ('id', 'name'):
+            value = self._safe_call(layer, name)
+            if value not in (None, ''):
+                parts.append(f"{name}={value}")
+
+        source = self._safe_call(layer, 'source') or self._safe_call(layer, 'publicSource')
+        if source:
+            parts.append(f"source={source}")
+            mtime = self._source_mtime(source)
+            if mtime is not None:
+                parts.append(f"mtime={mtime}")
+
+        renderer = self._safe_call(layer, 'renderer')
+        if renderer is not None:
+            dump = self._safe_call(renderer, 'dump')
+            if dump:
+                parts.append(f"renderer={dump}")
+
+        style_manager = self._safe_call(layer, 'styleManager')
+        if style_manager is not None:
+            current_style = self._safe_call(style_manager, 'currentStyle')
+            if current_style not in (None, ''):
+                parts.append(f"style={current_style}")
+
+        opacity = self._safe_call(layer, 'opacity')
+        if opacity is not None:
+            parts.append(f"opacity={opacity}")
+
+        blend_mode = self._safe_call(layer, 'blendMode')
+        if blend_mode is not None:
+            parts.append(f"blend={blend_mode}")
+
+        return '|'.join(parts) or repr(layer)
+
+    def _project_cache_fingerprint(self, project, layers):
+        digest = hashlib.sha256()
+        project_crs = self._safe_call(project, 'crs')
+        if project_crs is not None:
+            authid = self._safe_call(project_crs, 'authid')
+            if authid not in (None, ''):
+                digest.update(f"project_crs={authid}\n".encode('utf-8', 'ignore'))
+        for index, layer in enumerate(layers):
+            digest.update(
+                f"{index}:{self._layer_cache_key(layer)}\n".encode('utf-8', 'ignore')
+            )
+        return digest.hexdigest()
+
+    def _visible_layers_in_render_order(self, project):
+        root = project.layerTreeRoot()
+        visible_nodes = [
+            node for node in root.findLayers()
+            if node.isVisible() and node.layer() is not None
+        ]
+        visible_layers = [node.layer() for node in visible_nodes]
+
+        has_custom_order = getattr(root, 'hasCustomLayerOrder', None)
+        custom_layer_order = getattr(root, 'customLayerOrder', None)
+        if callable(has_custom_order) and has_custom_order() and callable(custom_layer_order):
+            visible_ids = {layer.id() for layer in visible_layers}
+            ordered_layers = [
+                layer for layer in custom_layer_order()
+                if layer is not None and layer.id() in visible_ids
+            ]
+            seen = {layer.id() for layer in ordered_layers}
+            ordered_layers.extend(
+                layer for layer in visible_layers
+                if layer.id() not in seen
+            )
+            return ordered_layers
+
+        return visible_layers
+
     def _render_single_tile(self, map_settings_template, zoom, x, y, tiles_dir,
                             tile_format, jpeg_quality, resume,
                             tile_cache=None, fingerprint=None,
@@ -563,16 +699,54 @@ class SMPGenerator:
         painter = QPainter(img)
         job = QgsMapRendererCustomPainterJob(ms, painter)
         job.start()
-        job.waitForFinished()
-        painter.end()
+        try:
+            cancel_without_blocking = getattr(job, 'cancelWithoutBlocking', None)
+            cancel = getattr(job, 'cancel', None)
+            is_active = getattr(job, 'isActive', None)
+
+            while True:
+                if ((cancel_event is not None and cancel_event.is_set()) or
+                        (self.feedback and self.feedback.isCanceled())):
+                    if cancel_event is not None:
+                        cancel_event.set()
+                    if callable(cancel_without_blocking):
+                        cancel_without_blocking()
+                    elif callable(cancel):
+                        cancel()
+                    job.waitForFinished()
+                    return False
+
+                if callable(is_active):
+                    active = is_active()
+                    if isinstance(active, bool):
+                        if not active:
+                            break
+                        time.sleep(0.01)
+                        continue
+                    if not active:
+                        break
+                    job.waitForFinished()
+                    break
+
+                job.waitForFinished()
+                break
+        finally:
+            painter.end()
 
         if tile_format == self.TILE_FORMAT_JPG:
-            img.save(tile_path, qt_format, jpeg_quality)
+            saved = img.save(tile_path, qt_format, jpeg_quality)
         else:
-            img.save(tile_path, qt_format)
+            saved = img.save(tile_path, qt_format)
+
+        if not saved:
+            try:
+                os.unlink(tile_path)
+            except OSError:
+                pass
+            raise OSError(f"Failed to save rendered tile: {tile_path}")
 
         if tile_cache is not None:
-            tile_cache.mark(zoom, x, y, fingerprint)
+            tile_cache.mark(zoom, x, y, fingerprint, defer_save=True)
 
         return True
 
@@ -596,7 +770,6 @@ class SMPGenerator:
             tile_format = self.TILE_FORMAT_PNG
 
         tile_format = tile_format.upper()
-        fingerprint = TileCache.make_fingerprint(tile_format, jpeg_quality)
 
         self.log("Generating tiles from map canvas...")
 
@@ -611,13 +784,13 @@ class SMPGenerator:
         # QGIS layer panel) so that rendering is deterministic across Processing
         # contexts.  findLayers() returns QgsLayerTreeLayer nodes top-to-bottom;
         # the first node is the topmost layer and is rendered on top.
-        root = project.layerTreeRoot()
-        visible_layers = [
-            node.layer()
-            for node in root.findLayers()
-            if node.isVisible() and node.layer() is not None
-        ]
+        visible_layers = self._visible_layers_in_render_order(project)
         map_settings.setLayers(visible_layers)
+        fingerprint = TileCache.make_fingerprint(
+            tile_format,
+            jpeg_quality,
+            self._project_cache_fingerprint(project, visible_layers)
+        )
 
         # Calculate total tiles across all zoom levels for progress tracking
         total_tiles = 0
@@ -710,19 +883,37 @@ class SMPGenerator:
             (minus cache metadata).
         """
         self.log(f"Creating SMP archive: {output_path}")
+        cancelled = False
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            zipf.write(style_path, 'style.json')
-            for root, _, files in os.walk(tiles_dir):
-                for file in files:
-                    # Never package internal cache metadata
-                    if file == TileCache.META_FILE:
-                        continue
-                    fp = os.path.join(root, file)
-                    rel = os.path.relpath(fp, tiles_dir).replace(os.sep, '/')
-                    # When a tile manifest is provided, skip stale tiles
-                    if tile_paths is not None and rel not in tile_paths:
-                        continue
-                    zipf.write(fp, 's/0/' + rel)
+            if self.feedback and self.feedback.isCanceled():
+                cancelled = True
+            else:
+                zipf.write(style_path, 'style.json')
+            if not cancelled:
+                for root, _, files in os.walk(tiles_dir):
+                    for file in files:
+                        if self.feedback and self.feedback.isCanceled():
+                            cancelled = True
+                            break
+                        # Never package internal cache metadata
+                        if file == TileCache.META_FILE:
+                            continue
+                        fp = os.path.join(root, file)
+                        rel = os.path.relpath(fp, tiles_dir).replace(os.sep, '/')
+                        # When a tile manifest is provided, skip stale tiles
+                        if tile_paths is not None and rel not in tile_paths:
+                            continue
+                        zipf.write(fp, 's/0/' + rel)
+                    if cancelled:
+                        break
+
+        if cancelled:
+            try:
+                os.unlink(output_path)
+            except OSError:
+                pass
+            return False
+        return True
 
     def _calculate_tile_extent(self, xtile, ytile, zoom):
         """

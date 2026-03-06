@@ -172,6 +172,10 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
 
         # Tile format (needed for disk-space estimate)
         tile_format_index = self.parameterAsEnum(parameters, self.TILE_FORMAT, context)
+        if not isinstance(tile_format_index, int):
+            return False, self.tr(
+                'Invalid tile format value: {}'.format(tile_format_index)
+            )
         if tile_format_index < 0 or tile_format_index >= len(self.TILE_FORMAT_OPTIONS):
             return False, self.tr(
                 'Invalid tile format index: {}'.format(tile_format_index)
@@ -207,6 +211,10 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
 
         # Get tile format
         tile_format_index = self.parameterAsEnum(parameters, self.TILE_FORMAT, context)
+        if not isinstance(tile_format_index, int):
+            raise QgsProcessingException(
+                self.tr('Invalid tile format value: {}'.format(tile_format_index))
+            )
         if tile_format_index < 0 or tile_format_index >= len(self.TILE_FORMAT_OPTIONS):
             raise QgsProcessingException(
                 self.tr('Invalid tile format index: {}'.format(tile_format_index))
@@ -228,7 +236,9 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
             )
 
         # Log the parameters for debugging
-        feedback.pushInfo(self.tr('Using all visible layers from the current map canvas'))
+        feedback.pushInfo(
+            self.tr('Using visible project layers in layer-tree order for rendering')
+        )
         feedback.pushInfo(self.tr(f'Extent: {extent.asWktPolygon()}'))
         feedback.pushInfo(self.tr(f'Min zoom: {min_zoom}'))
         feedback.pushInfo(self.tr(f'Max zoom: {max_zoom}'))

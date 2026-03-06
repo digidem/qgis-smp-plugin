@@ -68,7 +68,7 @@ PEP8EXCLUDE=pydev,resources.py,conf.py,third_party,ui
 #	* Windows:
 #	  AppData\Roaming\QGIS\QGIS3\profiles\default\python\plugins'
 
-QGISDIR=/home/luandro/.local/share/QGIS/QGIS3/profiles/default/python/plugins/
+QGIS_PLUGIN_DIR=$(HOME)/.local/share/QGIS/QGIS3/profiles/default/python/plugins
 
 #################################################
 # Normally you would not need to edit below here
@@ -97,8 +97,9 @@ compile: $(COMPILED_RESOURCE_FILES)
 %.qm : %.ts
 	$(LRELEASE) $<
 
-# Reliable QGIS-free logic tests — fails on real errors (use this in CI and
-# with agents; see README for why 'make test' is not reliable).
+# Reliable QGIS-free logic tests — this is the default `make test` path.
+test: test-logic
+
 test-logic:
 	@echo
 	@echo "----------------------------------------"
@@ -109,11 +110,12 @@ test-logic:
 
 # Legacy full test suite — requires QGIS Python env + nosetests installed.
 # WARNING: this target silences failures with '|| true'; a passing exit code
-# does NOT mean tests ran or passed.  Use 'make test-logic' instead.
-test: compile transcompile
+# does NOT mean tests ran or passed.  Use 'make test' or 'make test-logic'
+# for reliable local verification.
+test-legacy: compile transcompile
 	@echo
 	@echo "----------------------"
-	@echo "Regression Test Suite (legacy - see 'make test-logic' for reliable tests)"
+	@echo "Regression Test Suite (legacy - see 'make test' for reliable tests)"
 	@echo "----------------------"
 
 	@# Preceding dash means that make will continue in case of errors
@@ -124,27 +126,28 @@ test: compile transcompile
 		3>&1 1>&2 2>&3 3>&- || true
 	@echo "----------------------"
 	@echo "If you get a 'no module named qgis.core error, try sourcing"
-	@echo "the helper script we have provided first then run make test."
-	@echo "e.g. source run-env-linux.sh <path to qgis install>; make test"
+	@echo "the helper script we have provided first then run make test-legacy."
+	@echo "e.g. source run-env-linux.sh <path to qgis install>; make test-legacy"
 	@echo "----------------------"
 
 deploy: compile doc transcompile
 	@echo
 	@echo "------------------------------------------"
-	@echo "Deploying plugin to your .qgis2 directory."
+	@echo "Deploying plugin to your QGIS plugin directory."
 	@echo "------------------------------------------"
-	# The deploy  target only works on unix like operating system where
-	# the Python plugin directory is located at:
-	# $HOME/$(QGISDIR)/python/plugins
-	mkdir -p $(HOME)/$(QGISDIR)/python/plugins/$(PLUGINNAME)
-	cp -vf $(PY_FILES) $(HOME)/$(QGISDIR)/python/plugins/$(PLUGINNAME)
-	cp -vf $(UI_FILES) $(HOME)/$(QGISDIR)/python/plugins/$(PLUGINNAME)
-	cp -vf $(COMPILED_RESOURCE_FILES) $(HOME)/$(QGISDIR)/python/plugins/$(PLUGINNAME)
-	cp -vf $(EXTRAS) $(HOME)/$(QGISDIR)/python/plugins/$(PLUGINNAME)
-	cp -vfr i18n $(HOME)/$(QGISDIR)/python/plugins/$(PLUGINNAME)
-	cp -vfr $(HELP) $(HOME)/$(QGISDIR)/python/plugins/$(PLUGINNAME)/help
+	mkdir -p $(QGIS_PLUGIN_DIR)/$(PLUGINNAME)
+	cp -vf $(PY_FILES) $(QGIS_PLUGIN_DIR)/$(PLUGINNAME)
+ifneq ($(strip $(UI_FILES)),)
+	cp -vf $(UI_FILES) $(QGIS_PLUGIN_DIR)/$(PLUGINNAME)
+endif
+ifneq ($(strip $(COMPILED_RESOURCE_FILES)),)
+	cp -vf $(COMPILED_RESOURCE_FILES) $(QGIS_PLUGIN_DIR)/$(PLUGINNAME)
+endif
+	cp -vf $(EXTRAS) $(QGIS_PLUGIN_DIR)/$(PLUGINNAME)
+	cp -vfr i18n $(QGIS_PLUGIN_DIR)/$(PLUGINNAME)
+	cp -vfr $(HELP) $(QGIS_PLUGIN_DIR)/$(PLUGINNAME)/help
 	# Copy extra directories if any
-	(foreach EXTRA_DIR,(EXTRA_DIRS), cp -R (EXTRA_DIR) (HOME)/(QGISDIR)/python/plugins/(PLUGINNAME)/;)
+	$(foreach EXTRA_DIR,$(EXTRA_DIRS),cp -R $(EXTRA_DIR) $(QGIS_PLUGIN_DIR)/$(PLUGINNAME)/;)
 
 
 # The dclean target removes compiled python files from plugin directory
@@ -154,8 +157,8 @@ dclean:
 	@echo "-----------------------------------"
 	@echo "Removing any compiled python files."
 	@echo "-----------------------------------"
-	find $(HOME)/$(QGISDIR)/python/plugins/$(PLUGINNAME) -iname "*.pyc" -delete
-	find $(HOME)/$(QGISDIR)/python/plugins/$(PLUGINNAME) -iname ".git" -prune -exec rm -Rf {} \;
+	find $(QGIS_PLUGIN_DIR)/$(PLUGINNAME) -iname "*.pyc" -delete
+	find $(QGIS_PLUGIN_DIR)/$(PLUGINNAME) -iname ".git" -prune -exec rm -Rf {} \;
 
 
 derase:
@@ -163,7 +166,7 @@ derase:
 	@echo "-------------------------"
 	@echo "Removing deployed plugin."
 	@echo "-------------------------"
-	rm -Rf $(HOME)/$(QGISDIR)/python/plugins/$(PLUGINNAME)
+	rm -Rf $(QGIS_PLUGIN_DIR)/$(PLUGINNAME)
 
 zip: deploy dclean
 	@echo
@@ -173,7 +176,7 @@ zip: deploy dclean
 	# The zip target deploys the plugin and creates a zip file with the deployed
 	# content. You can then upload the zip file on http://plugins.qgis.org
 	rm -f $(PLUGINNAME).zip
-	cd $(HOME)/$(QGISDIR)/python/plugins; zip -9r $(CURDIR)/$(PLUGINNAME).zip $(PLUGINNAME)
+	cd $(QGIS_PLUGIN_DIR); zip -9r $(CURDIR)/$(PLUGINNAME).zip $(PLUGINNAME)
 
 package: compile
 	# Create a zip package of the plugin named $(PLUGINNAME).zip.

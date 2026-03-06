@@ -15,7 +15,8 @@ Operational instructions for coding agents working in this repository.
 
 ## Don't
 
-- Do not assume `make test` passing means tests actually ran. Current Makefile test command can pass even when `nosetests` is missing.
+- Do not use `make test-legacy` as a success signal; it keeps the old `|| true`
+  behavior and can pass even when tests fail or `nosetests` is missing.
 - Do not use `make deploy` or `make zip` as evidence that packaging is correct
   without first checking the file lists; current legacy targets can omit core
   runtime modules.
@@ -27,11 +28,10 @@ Operational instructions for coding agents working in this repository.
 
 - Fast file search: `rg --files`
 - Fast text search: `rg "pattern" -n`
-- Reliable local logic tests (no QGIS runtime needed): `PYTHONPATH=. python3 test/test_generator.py`
-  or `make test-logic` — both propagate exit code; safe for CI and agent verification.
-- Full legacy test command (requires QGIS Python env + `nosetests`): `make test`
-  WARNING: `make test` uses `|| true` and will exit 0 even when tests fail or nosetests
-  is missing. Do not use it as a success signal.
+- Reliable local logic tests (no QGIS runtime needed): `make test`,
+  `make test-logic`, or `PYTHONPATH=. python3 test/test_generator.py`
+- Full legacy QGIS test command (requires QGIS Python env + `nosetests`):
+  `make test-legacy`
 - Lint command (non-blocking by Makefile design): `make pylint`
 - Style command (non-blocking by Makefile design): `make pep8`
 - Package build: `make package VERSION=X.Y.Z`

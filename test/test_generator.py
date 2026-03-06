@@ -488,6 +488,10 @@ class TestCreateStyleJson(unittest.TestCase):
         self.assertEqual(source['minzoom'], 3)
         self.assertEqual(source['maxzoom'], 15)
 
+    def test_root_zoom_respects_min_zoom(self):
+        style = self.gen._create_style_from_canvas(self._make_extent(), 10, 10)
+        self.assertEqual(style['zoom'], 10)
+
 
 class TestCalculateTilesAtZoom(unittest.TestCase):
     """Test tile range calculations."""
@@ -749,6 +753,139 @@ class TestCacheDirectory(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_generate_with_cache_dir_rerenders_when_project_fingerprint_changes(self):
+        """A changed project render state must invalidate cache-backed resume."""
+        import comapeo_smp_generator as _mod
+
+        def build_project(renderer_dump):
+            layer = MagicMock()
+            layer.id.return_value = 'layer-1'
+            layer.name.return_value = 'Layer 1'
+            layer.source.return_value = '/tmp/layer-1.gpkg'
+            layer.renderer.return_value = MagicMock(dump=MagicMock(return_value=renderer_dump))
+            layer.styleManager.return_value = MagicMock(
+                currentStyle=MagicMock(return_value='default')
+            )
+            layer.opacity.return_value = 1.0
+            layer.blendMode.return_value = 0
+
+            node = MagicMock()
+            node.isVisible.return_value = True
+            node.layer.return_value = layer
+
+            root = MagicMock()
+            root.findLayers.return_value = [node]
+            root.hasCustomLayerOrder.return_value = False
+
+            project = MagicMock()
+            project.layerTreeRoot.return_value = root
+            project.crs.return_value = MagicMock()
+            return project
+
+        def make_save_counter():
+            calls = {'count': 0}
+
+            def save(path, *_args):
+                calls['count'] += 1
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, 'wb') as fh:
+                    fh.write(b'\x89PNG')
+                return True
+
+            return calls, save
+
+        cache = tempfile.mkdtemp()
+        out_dir = tempfile.mkdtemp()
+        try:
+            gen = SMPGenerator()
+            gen.validate_tile_count = MagicMock(return_value=(1, None))
+            gen.validate_extent_size = MagicMock(return_value=None)
+            gen.validate_disk_space = MagicMock()
+            gen._get_bounds_wgs84 = MagicMock(return_value=[-1, -1, 1, 1])
+            gen._calculate_tiles_at_zoom = MagicMock(return_value=[(0, 0, 0, 0)])
+            gen._calculate_tile_extent = MagicMock(return_value=MagicMock())
+
+            save_counter_1, save_fn_1 = make_save_counter()
+            project_class_mock = MagicMock()
+            project_class_mock.instance.return_value = build_project('style-a')
+
+            with patch.object(_mod, 'QgsProject', project_class_mock), \
+                 patch.object(_mod, 'QgsMapSettings', MagicMock()), \
+                 patch('comapeo_smp_generator.QImage',
+                       return_value=MagicMock(save=MagicMock(side_effect=save_fn_1))), \
+                 patch('comapeo_smp_generator.QPainter', MagicMock()), \
+                 patch('comapeo_smp_generator.QgsMapRendererCustomPainterJob', MagicMock()):
+                gen.generate_smp_from_canvas(
+                    _FakeRectangle(-1, -1, 1, 1), 0, 0,
+                    os.path.join(out_dir, 'first.smp'),
+                    cache_dir=cache
+                )
+
+            self.assertEqual(save_counter_1['count'], 1)
+
+            save_counter_2, save_fn_2 = make_save_counter()
+            project_class_mock.instance.return_value = build_project('style-b')
+
+            with patch.object(_mod, 'QgsProject', project_class_mock), \
+                 patch.object(_mod, 'QgsMapSettings', MagicMock()), \
+                 patch('comapeo_smp_generator.QImage',
+                       return_value=MagicMock(save=MagicMock(side_effect=save_fn_2))), \
+                 patch('comapeo_smp_generator.QPainter', MagicMock()), \
+                 patch('comapeo_smp_generator.QgsMapRendererCustomPainterJob', MagicMock()):
+                gen.generate_smp_from_canvas(
+                    _FakeRectangle(-1, -1, 1, 1), 0, 0,
+                    os.path.join(out_dir, 'second.smp'),
+                    cache_dir=cache
+                )
+
+            self.assertEqual(
+                save_counter_2['count'], 1,
+                "Project fingerprint change should force tile rerender"
+            )
+        finally:
+            shutil.rmtree(cache, ignore_errors=True)
+            shutil.rmtree(out_dir, ignore_errors=True)
+
+    def test_generate_with_cache_dir_excludes_stale_tiles_end_to_end(self):
+        """Manifest filtering should exclude stale cache tiles in final archives."""
+        gen = SMPGenerator()
+        gen.validate_tile_count = MagicMock(return_value=(1, None))
+        gen.validate_extent_size = MagicMock(return_value=None)
+        gen.validate_disk_space = MagicMock()
+        gen._get_bounds_wgs84 = MagicMock(return_value=[-1, -1, 1, 1])
+        gen._create_style_from_canvas = MagicMock(return_value={"version": 8})
+        gen._generate_tiles_from_canvas = MagicMock()
+
+        cache = tempfile.mkdtemp()
+        out_dir = tempfile.mkdtemp()
+        try:
+            import json
+            current_dir = os.path.join(cache, '0', '0')
+            stale_dir = os.path.join(cache, '1', '0')
+            os.makedirs(current_dir, exist_ok=True)
+            os.makedirs(stale_dir, exist_ok=True)
+            with open(os.path.join(current_dir, '0.png'), 'wb') as fh:
+                fh.write(b'\x89PNG')
+            with open(os.path.join(stale_dir, '0.png'), 'wb') as fh:
+                fh.write(b'\x89PNG')
+            with open(os.path.join(cache, TileCache.META_FILE), 'w') as fh:
+                json.dump({"0/0/0": "PNG:85:any"}, fh)
+
+            out_path = os.path.join(out_dir, 'manifest.smp')
+            gen.generate_smp_from_canvas(
+                _FakeRectangle(-1, -1, 1, 1), 0, 0, out_path, cache_dir=cache
+            )
+
+            import zipfile
+            with zipfile.ZipFile(out_path) as zf:
+                names = zf.namelist()
+            self.assertIn('s/0/0/0/0.png', names)
+            self.assertNotIn('s/0/1/0/0.png', names)
+            self.assertNotIn('s/0/_cache_meta.json', names)
+        finally:
+            shutil.rmtree(cache, ignore_errors=True)
+            shutil.rmtree(out_dir, ignore_errors=True)
+
 
 class TestLowZoomStyleOutput(unittest.TestCase):
     """default_zoom in style.json must never be negative."""
@@ -827,6 +964,36 @@ class TestCancelEventInRenderSingleTile(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_mid_render_cancellation_aborts_job(self):
+        gen = SMPGenerator()
+        gen._calculate_tile_extent = MagicMock(return_value=MagicMock())
+
+        fake_img = MagicMock()
+        fake_job = MagicMock()
+        fake_job.isActive.side_effect = [True, False]
+        fake_job.cancelWithoutBlocking = MagicMock()
+
+        feedback = MagicMock()
+        feedback.isCanceled.side_effect = [False, True]
+        gen.feedback = feedback
+
+        tmp = tempfile.mkdtemp()
+        try:
+            with patch('comapeo_smp_generator.QImage', return_value=fake_img), \
+                 patch('comapeo_smp_generator.QPainter', MagicMock()), \
+                 patch('comapeo_smp_generator.QgsMapRendererCustomPainterJob',
+                       return_value=fake_job):
+                result = gen._render_single_tile(
+                    MagicMock(), 0, 0, 0, tmp,
+                    'PNG', 85, False,
+                    cancel_event=threading.Event()
+                )
+            self.assertFalse(result)
+            fake_job.cancelWithoutBlocking.assert_called_once()
+            fake_img.save.assert_not_called()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 class TestGenerateSmpCancellation(unittest.TestCase):
     """generate_smp_from_canvas returns None when cancelled; no archive built."""
@@ -867,6 +1034,36 @@ class TestGenerateSmpCancellation(unittest.TestCase):
             result = gen.generate_smp_from_canvas(extent, 0, 1, out)
             self.assertEqual(result, out)
             gen._build_smp_archive.assert_called_once()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_cancel_during_archive_returns_none(self):
+        gen = SMPGenerator()
+        gen.validate_tile_count = MagicMock(return_value=(1, None))
+        gen.validate_extent_size = MagicMock(return_value=None)
+        gen.validate_disk_space = MagicMock()
+        gen._get_bounds_wgs84 = MagicMock(return_value=[-1, -1, 1, 1])
+        gen._create_style_from_canvas = MagicMock(return_value={"version": 8})
+
+        feedback = MagicMock()
+        feedback.isCanceled.side_effect = [False, False, True]
+        gen.feedback = feedback
+
+        tmp = tempfile.mkdtemp()
+        try:
+            out = os.path.join(tmp, 'test.smp')
+
+            def fake_generate(_extent, _min_zoom, _max_zoom, tiles_dir, **_kwargs):
+                tile_dir = os.path.join(tiles_dir, '0', '0')
+                os.makedirs(tile_dir, exist_ok=True)
+                with open(os.path.join(tile_dir, '0.png'), 'wb') as fh:
+                    fh.write(b'\x89PNG')
+
+            gen._generate_tiles_from_canvas = MagicMock(side_effect=fake_generate)
+
+            result = gen.generate_smp_from_canvas(_FakeRectangle(-1, -1, 1, 1), 0, 0, out)
+            self.assertIsNone(result)
+            self.assertFalse(os.path.exists(out))
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -981,12 +1178,10 @@ class TestTileSaveFailure(unittest.TestCase):
             with patch('comapeo_smp_generator.QImage', return_value=fake_img), \
                  patch('comapeo_smp_generator.QPainter', MagicMock()), \
                  patch('comapeo_smp_generator.QgsMapRendererCustomPainterJob', MagicMock()):
-                # save() is called; the tile is still "rendered" (returned True)
-                # but the tile file may be corrupt/empty — caller must detect via
-                # missing file.  At minimum, img.save() must have been called.
-                gen._render_single_tile(
-                    MagicMock(), 0, 0, 0, tmp, 'PNG', 85, False
-                )
+                with self.assertRaises(OSError):
+                    gen._render_single_tile(
+                        MagicMock(), 0, 0, 0, tmp, 'PNG', 85, False
+                    )
             fake_img.save.assert_called_once()
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -1043,6 +1238,35 @@ class TestTileCacheThreadSafety(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_multiple_instances_share_lock_for_same_cache_dir(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            cache_a = TileCache(tmp)
+            cache_b = TileCache(tmp)
+            fp = TileCache.make_fingerprint('PNG', 85)
+            errors = []
+
+            def mark(cache, index):
+                try:
+                    cache.mark(0, index, 0, fp)
+                except Exception as exc:
+                    errors.append(exc)
+
+            threads = []
+            for i in range(20):
+                threads.append(threading.Thread(target=mark, args=(cache_a, i)))
+                threads.append(threading.Thread(target=mark, args=(cache_b, i + 100)))
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            cache_a.flush()
+            cache_b.flush()
+            self.assertEqual(errors, [], f"Errors during multi-instance mark: {errors}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 class TestDeterministicLayerOrder(unittest.TestCase):
     """Layer list is sourced from root.findLayers(), not project.mapLayers()."""
@@ -1078,6 +1302,122 @@ class TestDeterministicLayerOrder(unittest.TestCase):
         # findLayers() must be the source; mapLayers() must not be called
         root_mock.findLayers.assert_called_once()
         project_instance.mapLayers.assert_not_called()
+
+    def test_custom_layer_order_is_used_when_enabled(self):
+        gen = SMPGenerator()
+        gen._calculate_tiles_at_zoom = MagicMock(return_value=[])
+
+        import comapeo_smp_generator as _mod
+
+        layer_a = MagicMock()
+        layer_a.id.return_value = 'a'
+        layer_b = MagicMock()
+        layer_b.id.return_value = 'b'
+
+        node_a = MagicMock()
+        node_a.isVisible.return_value = True
+        node_a.layer.return_value = layer_a
+        node_b = MagicMock()
+        node_b.isVisible.return_value = True
+        node_b.layer.return_value = layer_b
+
+        root_mock = MagicMock()
+        root_mock.findLayers.return_value = [node_a, node_b]
+        root_mock.hasCustomLayerOrder.return_value = True
+        root_mock.customLayerOrder.return_value = [layer_b, layer_a]
+
+        project_instance = MagicMock()
+        project_instance.layerTreeRoot.return_value = root_mock
+        project_instance.crs.return_value = MagicMock()
+
+        project_class_mock = MagicMock()
+        project_class_mock.instance.return_value = project_instance
+
+        map_settings_instance = MagicMock()
+        map_settings_class = MagicMock(return_value=map_settings_instance)
+
+        tmp = tempfile.mkdtemp()
+        try:
+            with patch.object(_mod, 'QgsProject', project_class_mock), \
+                 patch.object(_mod, 'QgsMapSettings', map_settings_class):
+                gen._generate_tiles_from_canvas(
+                    _FakeRectangle(0, 0, 1, 1), 0, 0, tmp
+                )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        map_settings_instance.setLayers.assert_called_once_with([layer_b, layer_a])
+
+    def test_project_fingerprint_changes_when_layer_state_changes(self):
+        gen = SMPGenerator()
+        project = MagicMock()
+        project.crs.return_value = MagicMock(authid=MagicMock(return_value='EPSG:4326'))
+
+        layer_a = MagicMock()
+        layer_a.id.return_value = 'a'
+        layer_a.name.return_value = 'Layer A'
+        layer_a.source.return_value = '/tmp/a.gpkg'
+        layer_a.renderer.return_value = MagicMock(dump=MagicMock(return_value='style-a'))
+        layer_a.styleManager.return_value = MagicMock(currentStyle=MagicMock(return_value='default'))
+        layer_a.opacity.return_value = 1.0
+        layer_a.blendMode.return_value = 0
+
+        layer_b = MagicMock()
+        layer_b.id.return_value = 'b'
+        layer_b.name.return_value = 'Layer B'
+        layer_b.source.return_value = '/tmp/b.gpkg'
+        layer_b.renderer.return_value = MagicMock(dump=MagicMock(return_value='style-b'))
+        layer_b.styleManager.return_value = MagicMock(currentStyle=MagicMock(return_value='default'))
+        layer_b.opacity.return_value = 1.0
+        layer_b.blendMode.return_value = 0
+
+        fp1 = gen._project_cache_fingerprint(project, [layer_a, layer_b])
+        fp2 = gen._project_cache_fingerprint(project, [layer_b, layer_a])
+        self.assertNotEqual(fp1, fp2)
+
+    def test_project_fingerprint_changes_when_style_changes(self):
+        gen = SMPGenerator()
+        project = MagicMock()
+        project.crs.return_value = MagicMock(authid=MagicMock(return_value='EPSG:4326'))
+
+        layer = MagicMock()
+        layer.id.return_value = 'a'
+        layer.name.return_value = 'Layer A'
+        layer.source.return_value = '/tmp/a.gpkg'
+        layer.opacity.return_value = 1.0
+        layer.blendMode.return_value = 0
+
+        renderer_a = MagicMock()
+        renderer_a.dump.return_value = 'style-a'
+        renderer_b = MagicMock()
+        renderer_b.dump.return_value = 'style-b'
+        layer.renderer.side_effect = [renderer_a, renderer_b]
+        layer.styleManager.return_value = MagicMock(currentStyle=MagicMock(return_value='default'))
+
+        fp1 = gen._project_cache_fingerprint(project, [layer])
+        fp2 = gen._project_cache_fingerprint(project, [layer])
+        self.assertNotEqual(fp1, fp2)
+
+    def test_project_fingerprint_changes_when_project_crs_changes(self):
+        gen = SMPGenerator()
+
+        project_a = MagicMock()
+        project_a.crs.return_value = MagicMock(authid=MagicMock(return_value='EPSG:4326'))
+        project_b = MagicMock()
+        project_b.crs.return_value = MagicMock(authid=MagicMock(return_value='EPSG:3857'))
+
+        layer = MagicMock()
+        layer.id.return_value = 'a'
+        layer.name.return_value = 'Layer A'
+        layer.source.return_value = '/tmp/a.gpkg'
+        layer.renderer.return_value = MagicMock(dump=MagicMock(return_value='style-a'))
+        layer.styleManager.return_value = MagicMock(currentStyle=MagicMock(return_value='default'))
+        layer.opacity.return_value = 1.0
+        layer.blendMode.return_value = 0
+
+        fp1 = gen._project_cache_fingerprint(project_a, [layer])
+        fp2 = gen._project_cache_fingerprint(project_b, [layer])
+        self.assertNotEqual(fp1, fp2)
 
 
 class TestCheckParameterValues(unittest.TestCase):
@@ -1172,6 +1512,18 @@ class TestCheckParameterValues(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(msg, '')
 
+    def test_non_integer_enum_value_blocked(self):
+        algo = self._make_algorithm()
+        extent = self._make_extent(0, 0, 1, 1)
+        algo.parameterAsExtent = MagicMock(return_value=extent)
+        algo.parameterAsInt = MagicMock(side_effect=lambda p, k, c: 0 if k == 'MIN_ZOOM' else 5)
+        algo.parameterAsEnum = MagicMock(return_value=None)
+        algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
+
+        ok, msg = algo.checkParameterValues({}, MagicMock())
+        self.assertFalse(ok)
+        self.assertIn('Invalid tile format value', msg)
+
     def test_inverted_zoom_range_blocked(self):
         """min_zoom > max_zoom should be caught before touching the generator."""
         algo = self._make_algorithm()
@@ -1204,6 +1556,17 @@ class TestCheckParameterValues(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn('Insufficient disk space', msg)
 
+    def test_process_algorithm_rejects_non_integer_enum_value(self):
+        algo = self._make_algorithm()
+        algo.parameterAsExtent = MagicMock(return_value=self._make_extent(0, 0, 1, 1))
+        algo.parameterAsInt = MagicMock(side_effect=lambda p, k, c: 0 if k == 'MIN_ZOOM' else 5)
+        algo.parameterAsEnum = MagicMock(return_value=None)
+        algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
+
+        with self.assertRaises(Exception) as ctx:
+            algo.processAlgorithm({}, MagicMock(), MagicMock())
+        self.assertIn('Invalid tile format value', str(ctx.exception))
+
     def test_empty_extent_skips_generator(self):
         """An empty extent should not call the generator (return True to let processAlgorithm handle it)."""
         algo = self._make_algorithm()
@@ -1215,6 +1578,67 @@ class TestCheckParameterValues(unittest.TestCase):
         ok, msg = algo.checkParameterValues({}, MagicMock())
 
         self.assertTrue(ok)
+
+
+class TestPluginLifecycle(unittest.TestCase):
+    """Plugin provider lifecycle guards should handle failed registry ops."""
+
+    def _load_plugin_class(self, add_ok=True, remove_ok=True):
+        import os
+        import sys
+
+        registry = MagicMock()
+        registry.addProvider.return_value = add_ok
+        registry.removeProvider.return_value = remove_ok
+
+        qgis_core = sys.modules['qgis.core']
+        qgis_core.QgsApplication = MagicMock()
+        qgis_core.QgsApplication.processingRegistry = MagicMock(return_value=registry)
+
+        provider_cls = MagicMock()
+        plugin_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'comapeo_smp.py'))
+        with open(plugin_path) as fh:
+            src = fh.read()
+
+        src = src.replace(
+            'from .comapeo_smp_provider import ComapeoMapBuilderProvider',
+            'ComapeoMapBuilderProvider = provider_cls'
+        )
+
+        ns = {'__name__': 'comapeo_smp', 'provider_cls': provider_cls}
+        exec(compile(src, plugin_path, 'exec'), ns)  # noqa: S102
+        return ns['ComapeoMapBuilderPlugin'], registry, provider_cls
+
+    def test_failed_add_provider_does_not_mark_initialized(self):
+        cls, registry, provider_cls = self._load_plugin_class(add_ok=False)
+        plugin = cls()
+
+        plugin.initProcessing()
+
+        registry.addProvider.assert_called_once()
+        provider_cls.assert_called_once()
+        self.assertIsNone(plugin.provider)
+
+    def test_retry_after_failed_add_provider(self):
+        cls, registry, _provider_cls = self._load_plugin_class(add_ok=False)
+        plugin = cls()
+        plugin.initProcessing()
+        registry.addProvider.return_value = True
+
+        plugin.initProcessing()
+
+        self.assertEqual(registry.addProvider.call_count, 2)
+        self.assertIsNotNone(plugin.provider)
+
+    def test_failed_remove_provider_keeps_handle(self):
+        cls, registry, _provider_cls = self._load_plugin_class(add_ok=True, remove_ok=False)
+        plugin = cls()
+        plugin.initProcessing()
+
+        plugin.unload()
+
+        registry.removeProvider.assert_called_once()
+        self.assertIsNotNone(plugin.provider)
 
 
 class TestSMPArchiveStructure(unittest.TestCase):

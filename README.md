@@ -36,7 +36,8 @@ produce vector tiles, glyphs, or sprite assets.
    ```
    git clone https://github.com/digidem/qgis-smp-plugin.git
    ```
-2. Copy or symlink the `comapeo_smp` folder to your QGIS plugins directory:
+2. Copy or symlink this repository root into your QGIS plugins directory as
+   `comapeo_smp`:
    - Linux: `~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/`
    - Windows: `C:\Users\{username}\AppData\Roaming\QGIS\QGIS3\profiles\default\python\plugins\`
    - macOS: `~/Library/Application Support/QGIS/QGIS3/profiles/default/python/plugins/`
@@ -57,7 +58,8 @@ produce vector tiles, glyphs, or sprite assets.
    - **Output SMP file**: The location to save the SMP file
 6. Click "Run" to generate the SMP file
 
-The plugin will use all visible layers from the current map canvas to generate the SMP file, similar to how the MBTiles exporter works.
+The plugin renders visible project layers in QGIS layer-tree order, and uses
+custom layer order when that project setting is enabled.
 
 ### Tips for Better Results
 
@@ -84,14 +86,16 @@ make package VERSION=X.Y.Z
 ### Running Tests
 
 ```bash
-# Reliable QGIS-free logic tests (use this for local verification):
-make test-logic
+# Reliable QGIS-free logic tests (default `make test` path):
+make test
 # or equivalently:
+make test-logic
+# or directly:
 PYTHONPATH=. python3 test/test_generator.py
 
 # Legacy full test suite (requires QGIS Python env + nosetests;
 # exits 0 even when tests fail — do not rely on this in CI):
-make test
+make test-legacy
 ```
 
 ## License
