@@ -45,6 +45,7 @@ class TileCache:
     def __init__(self, cache_dir):
         self.cache_dir = cache_dir
         self._meta_path = os.path.join(cache_dir, self.META_FILE)
+        self._lock = threading.Lock()
         self._meta = self._load()
 
     def _load(self):
@@ -57,8 +58,18 @@ class TileCache:
         return {}
 
     def _save(self):
-        with open(self._meta_path, 'w') as fh:
-            json.dump(self._meta, fh)
+        """Write metadata atomically: write to a temp file then rename."""
+        tmp_path = self._meta_path + '.tmp'
+        try:
+            with open(tmp_path, 'w') as fh:
+                json.dump(self._meta, fh)
+            os.replace(tmp_path, self._meta_path)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     @staticmethod
     def make_fingerprint(tile_format, jpeg_quality):
@@ -71,20 +82,26 @@ class TileCache:
         return self._meta.get(key) == fingerprint
 
     def mark(self, zoom, x, y, fingerprint):
-        """Record that tile (zoom, x, y) was rendered with this fingerprint."""
+        """Record that tile (zoom, x, y) was rendered with this fingerprint.
+
+        Thread-safe: acquires the instance lock before mutating shared state.
+        """
         key = f"{zoom}/{x}/{y}"
-        self._meta[key] = fingerprint
-        self._save()
+        with self._lock:
+            self._meta[key] = fingerprint
+            self._save()
 
     def invalidate(self, zoom, x, y):
         """Remove a tile's fingerprint so it will be re-rendered next run.
 
         Not used internally; kept for external callers that need to force
         re-rendering of a specific tile (e.g. after source data changes).
+        Thread-safe: acquires the instance lock before mutating shared state.
         """
         key = f"{zoom}/{x}/{y}"
-        self._meta.pop(key, None)
-        self._save()
+        with self._lock:
+            self._meta.pop(key, None)
+            self._save()
 
 
 
