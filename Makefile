@@ -44,7 +44,10 @@ PLUGINNAME = comapeo_smp
 
 PY_FILES = \
 	__init__.py \
-	comapeo_smp.py 
+	comapeo_smp.py \
+	comapeo_smp_provider.py \
+	comapeo_smp_algorithm.py \
+	comapeo_smp_generator.py
 
 UI_FILES = 
 
@@ -94,10 +97,23 @@ compile: $(COMPILED_RESOURCE_FILES)
 %.qm : %.ts
 	$(LRELEASE) $<
 
+# Reliable QGIS-free logic tests — fails on real errors (use this in CI and
+# with agents; see README for why 'make test' is not reliable).
+test-logic:
+	@echo
+	@echo "----------------------------------------"
+	@echo "QGIS-free logic tests (reliable)"
+	@echo "----------------------------------------"
+	PYTHONPATH=. python3 test/test_generator.py -v
+	@echo "----------------------------------------"
+
+# Legacy full test suite — requires QGIS Python env + nosetests installed.
+# WARNING: this target silences failures with '|| true'; a passing exit code
+# does NOT mean tests ran or passed.  Use 'make test-logic' instead.
 test: compile transcompile
 	@echo
 	@echo "----------------------"
-	@echo "Regression Test Suite"
+	@echo "Regression Test Suite (legacy - see 'make test-logic' for reliable tests)"
 	@echo "----------------------"
 
 	@# Preceding dash means that make will continue in case of errors
