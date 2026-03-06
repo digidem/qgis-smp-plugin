@@ -8,12 +8,17 @@ Operational instructions for coding agents working in this repository.
 - Preserve QGIS Processing parameter IDs in `comapeo_smp_algorithm.py` unless a migration is explicitly requested.
 - Parameter IDs to keep stable: `EXTENT`, `MIN_ZOOM`, `MAX_ZOOM`, `TILE_FORMAT`, `JPEG_QUALITY`, `OUTPUT_FILE`.
 - Add or update tests when changing tile math, bounds logic, thresholds, or parameter validation.
+- Add or update tests when changing cancellation, cache/resume behavior, archive contents, or layer selection/order.
+- Keep `.smp` archives free of internal cache artifacts such as `_cache_meta.json`, and ensure cache-backed exports only package tiles for the current run.
 - Prefer deterministic checks that fail on error and report exact commands run.
 - Update docs when behavior or user-facing options change (`README.md`, `XYZ_SMP.md`, `metadata.txt` changelog if releasing).
 
 ## Don't
 
 - Do not assume `make test` passing means tests actually ran. Current Makefile test command can pass even when `nosetests` is missing.
+- Do not use `make deploy` or `make zip` as evidence that packaging is correct
+  without first checking the file lists; current legacy targets can omit core
+  runtime modules.
 - Do not run deployment or destructive make targets unless explicitly requested: `make deploy`, `make dclean`, `make derase`, `make zip`, `make upload`.
 - Do not bump `metadata.txt` version or edit release workflow details unless the user asked for a release/version change.
 - Do not rewrite large plugin-builder header blocks unless needed for the task.
@@ -23,7 +28,10 @@ Operational instructions for coding agents working in this repository.
 - Fast file search: `rg --files`
 - Fast text search: `rg "pattern" -n`
 - Reliable local logic tests (no QGIS runtime needed): `PYTHONPATH=. python3 test/test_generator.py`
+  or `make test-logic` — both propagate exit code; safe for CI and agent verification.
 - Full legacy test command (requires QGIS Python env + `nosetests`): `make test`
+  WARNING: `make test` uses `|| true` and will exit 0 even when tests fail or nosetests
+  is missing. Do not use it as a success signal.
 - Lint command (non-blocking by Makefile design): `make pylint`
 - Style command (non-blocking by Makefile design): `make pep8`
 - Package build: `make package VERSION=X.Y.Z`
@@ -55,5 +63,8 @@ Operational instructions for coding agents working in this repository.
 ## When Stuck
 
 - If QGIS runtime is unavailable, run `PYTHONPATH=. python3 test/test_generator.py` and clearly note QGIS-dependent gaps.
+- If `python3 -m unittest test...` fails outside a QGIS Python environment,
+  remember that `test/__init__.py` imports `qgis` eagerly; that failure does
+  not invalidate the QGIS-free logic tests.
 - If command behavior is unclear, inspect with `make -n` before executing.
 - If requirements conflict, follow explicit user instructions first and call out tradeoffs briefly.
