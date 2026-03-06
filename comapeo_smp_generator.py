@@ -43,38 +43,47 @@ class TileCache:
     """
 
     META_FILE = '_cache_meta.json'
-    _path_locks = {}
-    _path_locks_guard = threading.Lock()
+    _path_states = {}
+    _path_states_guard = threading.Lock()
 
     def __init__(self, cache_dir):
         self.cache_dir = cache_dir
         self._meta_path = os.path.join(cache_dir, self.META_FILE)
-        self._lock = self._lock_for_path(self._meta_path)
-        self._meta = self._load()
-        self._dirty = False
+        self._state = self._state_for_path(self._meta_path)
+        self._lock = self._state['lock']
 
     @classmethod
-    def _lock_for_path(cls, path):
-        with cls._path_locks_guard:
-            if path not in cls._path_locks:
-                cls._path_locks[path] = threading.Lock()
-            return cls._path_locks[path]
+    def _state_for_path(cls, path):
+        with cls._path_states_guard:
+            if path not in cls._path_states:
+                cache_dir = os.path.dirname(path)
+                cls._path_states[path] = {
+                    'lock': threading.Lock(),
+                    'meta': cls._load_from_path(path),
+                    'dirty': False,
+                    'cache_dir': cache_dir,
+                }
+            return cls._path_states[path]
 
-    def _load(self):
-        if os.path.exists(self._meta_path):
+    @staticmethod
+    def _load_from_path(path):
+        if os.path.exists(path):
             try:
-                with open(self._meta_path) as fh:
+                with open(path) as fh:
                     return json.load(fh)
             except (json.JSONDecodeError, OSError):
                 return {}
         return {}
+
+    def _load(self):
+        return self._load_from_path(self._meta_path)
 
     def _save(self):
         """Write metadata atomically: write to a temp file then rename."""
         tmp_path = self._meta_path + '.tmp'
         try:
             with open(tmp_path, 'w') as fh:
-                json.dump(self._meta, fh)
+                json.dump(self._state['meta'], fh)
             os.replace(tmp_path, self._meta_path)
         except Exception:
             try:
@@ -93,7 +102,7 @@ class TileCache:
     def is_fresh(self, zoom, x, y, fingerprint):
         """Return True if the cached tile matches the current fingerprint."""
         key = f"{zoom}/{x}/{y}"
-        return self._meta.get(key) == fingerprint
+        return self._state['meta'].get(key) == fingerprint
 
     def mark(self, zoom, x, y, fingerprint, defer_save=False):
         """Record that tile (zoom, x, y) was rendered with this fingerprint.
@@ -102,12 +111,12 @@ class TileCache:
         """
         key = f"{zoom}/{x}/{y}"
         with self._lock:
-            self._meta[key] = fingerprint
+            self._state['meta'][key] = fingerprint
             if defer_save:
-                self._dirty = True
+                self._state['dirty'] = True
             else:
                 self._save()
-                self._dirty = False
+                self._state['dirty'] = False
 
     def invalidate(self, zoom, x, y, defer_save=False):
         """Remove a tile fingerprint so a future run will re-render it.
@@ -118,19 +127,19 @@ class TileCache:
         """
         key = f"{zoom}/{x}/{y}"
         with self._lock:
-            self._meta.pop(key, None)
+            self._state['meta'].pop(key, None)
             if defer_save:
-                self._dirty = True
+                self._state['dirty'] = True
             else:
                 self._save()
-                self._dirty = False
+                self._state['dirty'] = False
 
     def flush(self):
         """Persist deferred metadata updates, if any."""
         with self._lock:
-            if self._dirty:
+            if self._state['dirty']:
                 self._save()
-                self._dirty = False
+                self._state['dirty'] = False
 
 
 
