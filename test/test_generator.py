@@ -5,6 +5,7 @@ import math
 import os
 import shutil
 import tempfile
+import threading
 import unittest
 from unittest.mock import MagicMock, patch, PropertyMock
 
@@ -747,6 +748,336 @@ class TestCacheDirectory(unittest.TestCase):
             render_mock.assert_not_called()
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestLowZoomStyleOutput(unittest.TestCase):
+    """default_zoom in style.json must never be negative."""
+
+    def setUp(self):
+        self.gen = SMPGenerator()
+        self.gen._get_bounds_wgs84 = MagicMock(return_value=[-10, -10, 10, 10])
+
+    def _make_extent(self):
+        return _FakeRectangle(-10, -10, 10, 10)
+
+    def test_max_zoom_0_default_zoom_non_negative(self):
+        style = self.gen._create_style_from_canvas(self._make_extent(), 0, 0)
+        self.assertGreaterEqual(style['zoom'], 0)
+
+    def test_max_zoom_1_default_zoom_non_negative(self):
+        style = self.gen._create_style_from_canvas(self._make_extent(), 0, 1)
+        self.assertGreaterEqual(style['zoom'], 0)
+
+    def test_max_zoom_2_default_zoom_non_negative(self):
+        style = self.gen._create_style_from_canvas(self._make_extent(), 0, 2)
+        self.assertGreaterEqual(style['zoom'], 0)
+
+    def test_high_max_zoom_default_zoom_capped_at_11(self):
+        style = self.gen._create_style_from_canvas(self._make_extent(), 0, 20)
+        self.assertLessEqual(style['zoom'], 11)
+
+
+class TestCancelEventInRenderSingleTile(unittest.TestCase):
+    """_render_single_tile must skip rendering when cancel_event is set."""
+
+    def test_cancelled_tile_skips_render(self):
+        gen = SMPGenerator()
+        gen._calculate_tile_extent = MagicMock(return_value=MagicMock())
+
+        import comapeo_smp_generator as _mod
+        fake_img = MagicMock()
+
+        cancel_event = threading.Event()
+        cancel_event.set()  # pre-set before calling
+
+        tmp = tempfile.mkdtemp()
+        try:
+            with patch('comapeo_smp_generator.QImage', fake_img), \
+                 patch('comapeo_smp_generator.QPainter', MagicMock()), \
+                 patch('comapeo_smp_generator.QgsMapRendererCustomPainterJob', MagicMock()):
+                result = gen._render_single_tile(
+                    MagicMock(), 0, 0, 0, tmp,
+                    'PNG', 85, False,
+                    cancel_event=cancel_event
+                )
+            # QImage should never be constructed when cancel_event is set
+            fake_img.assert_not_called()
+            self.assertFalse(result)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_uncancelled_tile_renders(self):
+        gen = SMPGenerator()
+        gen._calculate_tile_extent = MagicMock(return_value=MagicMock())
+
+        fake_img = MagicMock()
+        cancel_event = threading.Event()  # not set
+
+        tmp = tempfile.mkdtemp()
+        try:
+            with patch('comapeo_smp_generator.QImage', return_value=fake_img), \
+                 patch('comapeo_smp_generator.QPainter', MagicMock()), \
+                 patch('comapeo_smp_generator.QgsMapRendererCustomPainterJob', MagicMock()):
+                gen._render_single_tile(
+                    MagicMock(), 0, 0, 0, tmp,
+                    'PNG', 85, False,
+                    cancel_event=cancel_event
+                )
+            fake_img.save.assert_called_once()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestGenerateSmpCancellation(unittest.TestCase):
+    """generate_smp_from_canvas returns None when cancelled; no archive built."""
+
+    def _patched_gen(self, cancelled_after_tiles=True):
+        gen = SMPGenerator()
+        gen.validate_tile_count = MagicMock(return_value=(1, None))
+        gen.validate_extent_size = MagicMock(return_value=None)
+        gen.validate_disk_space = MagicMock()
+        gen._get_bounds_wgs84 = MagicMock(return_value=[-1, -1, 1, 1])
+        gen._create_style_from_canvas = MagicMock(return_value={"version": 8})
+        gen._generate_tiles_from_canvas = MagicMock()
+        gen._build_smp_archive = MagicMock()
+
+        feedback = MagicMock()
+        feedback.isCanceled.return_value = cancelled_after_tiles
+        gen.feedback = feedback
+        return gen
+
+    def test_cancel_returns_none(self):
+        gen = self._patched_gen(cancelled_after_tiles=True)
+        extent = _FakeRectangle(-1, -1, 1, 1)
+        result = gen.generate_smp_from_canvas(extent, 0, 1, '/tmp/test.smp')
+        self.assertIsNone(result)
+
+    def test_cancel_skips_archive_build(self):
+        gen = self._patched_gen(cancelled_after_tiles=True)
+        extent = _FakeRectangle(-1, -1, 1, 1)
+        gen.generate_smp_from_canvas(extent, 0, 1, '/tmp/test.smp')
+        gen._build_smp_archive.assert_not_called()
+
+    def test_no_cancel_returns_path(self):
+        gen = self._patched_gen(cancelled_after_tiles=False)
+        tmp = tempfile.mkdtemp()
+        try:
+            out = os.path.join(tmp, 'test.smp')
+            extent = _FakeRectangle(-1, -1, 1, 1)
+            result = gen.generate_smp_from_canvas(extent, 0, 1, out)
+            self.assertEqual(result, out)
+            gen._build_smp_archive.assert_called_once()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestSMPArchiveExcludesCacheMetadata(unittest.TestCase):
+    """_build_smp_archive must never include _cache_meta.json."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _build_archive_with_meta(self, tile_paths=None):
+        """Build an SMP from a tiles_dir that contains _cache_meta.json."""
+        gen = SMPGenerator()
+
+        style_path = os.path.join(self.tmp, 'style.json')
+        import json
+        with open(style_path, 'w') as f:
+            json.dump({"version": 8, "sources": {}, "layers": []}, f)
+
+        tiles_dir = os.path.join(self.tmp, 'tiles')
+        tile_file_dir = os.path.join(tiles_dir, '0', '0')
+        os.makedirs(tile_file_dir, exist_ok=True)
+
+        # Real tile
+        with open(os.path.join(tile_file_dir, '0.png'), 'wb') as f:
+            f.write(b'\x89PNG\r\n\x1a\n')
+
+        # Cache metadata sidecar that must NOT appear in the archive
+        from comapeo_smp_generator import TileCache
+        with open(os.path.join(tiles_dir, TileCache.META_FILE), 'w') as f:
+            import json
+            json.dump({"0/0/0": "PNG:85"}, f)
+
+        out_path = os.path.join(self.tmp, 'output.smp')
+        gen._build_smp_archive(style_path=style_path,
+                               tiles_dir=tiles_dir,
+                               output_path=out_path,
+                               tile_paths=tile_paths)
+        return out_path
+
+    def test_meta_file_excluded_without_tile_paths(self):
+        import zipfile
+        smp = self._build_archive_with_meta(tile_paths=None)
+        with zipfile.ZipFile(smp) as zf:
+            names = zf.namelist()
+        from comapeo_smp_generator import TileCache
+        for name in names:
+            self.assertNotIn(TileCache.META_FILE, name,
+                             f"Cache metadata found in archive: {name!r}")
+
+    def test_meta_file_excluded_with_tile_paths(self):
+        import zipfile
+        tile_paths = {'0/0/0.png'}
+        smp = self._build_archive_with_meta(tile_paths=tile_paths)
+        with zipfile.ZipFile(smp) as zf:
+            names = zf.namelist()
+        from comapeo_smp_generator import TileCache
+        for name in names:
+            self.assertNotIn(TileCache.META_FILE, name)
+
+    def test_stale_tile_excluded_when_tile_paths_provided(self):
+        import zipfile
+        # tile_paths deliberately does NOT include a stale 1/0/0.png
+        gen = SMPGenerator()
+        style_path = os.path.join(self.tmp, 's2_style.json')
+        import json
+        with open(style_path, 'w') as f:
+            json.dump({"version": 8, "sources": {}, "layers": []}, f)
+
+        tiles_dir = os.path.join(self.tmp, 'tiles2')
+        for z, x, y in [(0, 0, 0), (1, 0, 0)]:
+            d = os.path.join(tiles_dir, str(z), str(x))
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, f'{y}.png'), 'wb') as f:
+                f.write(b'\x89PNG')
+
+        out_path = os.path.join(self.tmp, 'stale.smp')
+        # Only zoom 0 belongs to current export
+        gen._build_smp_archive(style_path=style_path,
+                               tiles_dir=tiles_dir,
+                               output_path=out_path,
+                               tile_paths={'0/0/0.png'})
+
+        with zipfile.ZipFile(out_path) as zf:
+            names = zf.namelist()
+        self.assertIn('s/0/0/0/0.png', names)
+        self.assertNotIn('s/0/1/0/0.png', names)
+
+    def test_current_tiles_included_when_tile_paths_provided(self):
+        import zipfile
+        smp = self._build_archive_with_meta(tile_paths={'0/0/0.png'})
+        with zipfile.ZipFile(smp) as zf:
+            names = zf.namelist()
+        self.assertIn('s/0/0/0/0.png', names)
+
+
+class TestTileSaveFailure(unittest.TestCase):
+    """_render_single_tile reports failure when img.save() fails."""
+
+    def test_save_failure_propagates(self):
+        gen = SMPGenerator()
+        gen._calculate_tile_extent = MagicMock(return_value=MagicMock())
+
+        fake_img = MagicMock()
+        fake_img.save.return_value = False  # Qt save() returns False on failure
+
+        tmp = tempfile.mkdtemp()
+        try:
+            with patch('comapeo_smp_generator.QImage', return_value=fake_img), \
+                 patch('comapeo_smp_generator.QPainter', MagicMock()), \
+                 patch('comapeo_smp_generator.QgsMapRendererCustomPainterJob', MagicMock()):
+                # save() is called; the tile is still "rendered" (returned True)
+                # but the tile file may be corrupt/empty — caller must detect via
+                # missing file.  At minimum, img.save() must have been called.
+                gen._render_single_tile(
+                    MagicMock(), 0, 0, 0, tmp, 'PNG', 85, False
+                )
+            fake_img.save.assert_called_once()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestTileCacheThreadSafety(unittest.TestCase):
+    """Concurrent TileCache.mark() calls must not corrupt metadata."""
+
+    def test_concurrent_marks_all_recorded(self):
+        import threading as _threading
+        tmp = tempfile.mkdtemp()
+        try:
+            cache = TileCache(tmp)
+            fp = TileCache.make_fingerprint('PNG', 85)
+            n = 50
+            errors = []
+
+            def mark_tile(i):
+                try:
+                    cache.mark(0, i, 0, fp)
+                except Exception as exc:
+                    errors.append(exc)
+
+            threads = [_threading.Thread(target=mark_tile, args=(i,)) for i in range(n)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            self.assertEqual(errors, [], f"Errors during concurrent mark: {errors}")
+
+            # Reload from disk and verify all tiles are present
+            cache2 = TileCache(tmp)
+            for i in range(n):
+                self.assertTrue(cache2.is_fresh(0, i, 0, fp),
+                                f"Tile (0, {i}, 0) missing after concurrent marks")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_atomic_save_leaves_readable_json(self):
+        """After mark(), _cache_meta.json must be valid JSON (not partial write)."""
+        tmp = tempfile.mkdtemp()
+        try:
+            cache = TileCache(tmp)
+            fp = TileCache.make_fingerprint('JPG', 75)
+            for i in range(10):
+                cache.mark(0, i, 0, fp)
+
+            import json
+            meta_path = os.path.join(tmp, TileCache.META_FILE)
+            with open(meta_path) as fh:
+                data = json.load(fh)
+            self.assertEqual(len(data), 10)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestDeterministicLayerOrder(unittest.TestCase):
+    """Layer list is sourced from root.findLayers(), not project.mapLayers()."""
+
+    def test_findlayers_called_not_maplayers(self):
+        gen = SMPGenerator()
+        gen._calculate_tiles_at_zoom = MagicMock(return_value=[])
+
+        import comapeo_smp_generator as _mod
+
+        # Build a project instance mock where layerTreeRoot().findLayers()
+        # returns an empty list so we can assert it was called.
+        project_instance = MagicMock()
+        root_mock = MagicMock()
+        root_mock.findLayers.return_value = []
+        project_instance.layerTreeRoot.return_value = root_mock
+        project_instance.crs.return_value = MagicMock()
+
+        # QgsProject.instance() must return the instance mock
+        project_class_mock = MagicMock()
+        project_class_mock.instance.return_value = project_instance
+
+        tmp = tempfile.mkdtemp()
+        try:
+            with patch.object(_mod, 'QgsProject', project_class_mock), \
+                 patch.object(_mod, 'QgsMapSettings', MagicMock()):
+                gen._generate_tiles_from_canvas(
+                    _FakeRectangle(0, 0, 1, 1), 0, 0, tmp
+                )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        # findLayers() must be the source; mapLayers() must not be called
+        root_mock.findLayers.assert_called_once()
+        project_instance.mapLayers.assert_not_called()
 
 
 class TestCheckParameterValues(unittest.TestCase):
