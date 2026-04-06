@@ -23,7 +23,7 @@ changelog=
     0.5.0 - World base zoom tiles & rendering hang fix
     * Add 'Include world tiles for low zoom levels' option for global base tile coverage
     * Add 'World low-zoom coverage (3-5)' parameter to control world tile depth
-    * Fix rendering deadlock that progress bar stuck at 0%)
+    * Fix rendering deadlock that progress bar stuck at 0%%)
       - Replace broken isActive() polling with waitForFinished()
       - Serialise QgsMapRendererCustomPainterJob via render lock
     0.4.0 - Large map support & usability

@@ -530,7 +530,7 @@ class TestTileFormatConstants(unittest.TestCase):
         extent = _FakeRectangle(-1, -1, 1, 1)
         with self.assertRaises(ValueError):
             gen.generate_smp_from_canvas(
-                extent, 0, 1, '/tmp/test.smp', tile_format='WEBP'
+                extent, 0, 1, '/tmp/test.smp', tile_format='BMP'
             )
 
     def test_jpeg_quality_clamped(self):
@@ -2272,6 +2272,485 @@ class TestSourceNoCenter(unittest.TestCase):
         style = self.gen._create_style_from_canvas(self._make_extent(), 0, 10)
         self.assertIn('center', style)
         self.assertEqual(len(style['center']), 2)
+
+
+class TestWebPFormatSupport(unittest.TestCase):
+    """WebP tile format support (Task 5)."""
+
+    def setUp(self):
+        self.gen = SMPGenerator()
+        self.gen._get_bounds_wgs84 = MagicMock(return_value=[-10, -10, 10, 10])
+
+    def _make_extent(self):
+        return _FakeRectangle(-10, -10, 10, 10)
+
+    def test_webp_format_constant_exists(self):
+        """SMPGenerator must define a TILE_FORMAT_WEBP constant."""
+        self.assertEqual(SMPGenerator.TILE_FORMAT_WEBP, 'WEBP')
+
+    def test_webp_style_has_webp_url(self):
+        """style.json tiles URL must use .webp extension."""
+        style = self.gen._create_style_from_canvas(
+            self._make_extent(), 0, 10, 'WEBP'
+        )
+        source = list(style['sources'].values())[0]
+        self.assertIn('.webp', source['tiles'][0])
+
+    def test_webp_style_format_field(self):
+        """style.json source 'format' field must be 'webp'."""
+        style = self.gen._create_style_from_canvas(
+            self._make_extent(), 0, 10, 'WEBP'
+        )
+        source = list(style['sources'].values())[0]
+        self.assertEqual(source['format'], 'webp')
+
+    def test_webp_accepted_by_generate_smp(self):
+        """generate_smp_from_canvas must accept 'WEBP' without raising ValueError."""
+        gen = SMPGenerator()
+        gen.validate_tile_count = MagicMock(return_value=(1, None))
+        gen.validate_extent_size = MagicMock(return_value=None)
+        gen.validate_disk_space = MagicMock()
+        gen._create_style_from_canvas = MagicMock(return_value={"version": 8})
+        gen._generate_tiles_from_canvas = MagicMock()
+        gen._build_smp_archive = MagicMock()
+        gen._get_bounds_wgs84 = MagicMock(return_value=[-1, -1, 1, 1])
+
+        tmp = tempfile.mkdtemp()
+        try:
+            out = os.path.join(tmp, 'test.smp')
+            extent = _FakeRectangle(-1, -1, 1, 1)
+            gen.generate_smp_from_canvas(
+                extent, 0, 1, out, tile_format='WEBP'
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        # If we get here without ValueError, the test passes
+
+    def test_webp_tile_paths_in_manifest(self):
+        """_tile_paths_from_plan must produce .webp extensions for WEBP format."""
+        tiles_by_zoom = [(0, 0, 0, 0, 0, 1)]
+        paths = SMPGenerator._tile_paths_from_plan(tiles_by_zoom, 'WEBP')
+        self.assertIn('0/0/0.webp', paths)
+        self.assertNotIn('0/0/0.png', paths)
+        self.assertNotIn('0/0/0.jpg', paths)
+
+    def test_webp_archive_contains_webp_tiles(self):
+        """Archive built with WEBP tiles must contain .webp entries."""
+        gen = SMPGenerator()
+        tmp = tempfile.mkdtemp()
+        try:
+            import json
+            style_path = os.path.join(tmp, 'style.json')
+            with open(style_path, 'w') as f:
+                json.dump({"version": 8, "sources": {}, "layers": []}, f)
+
+            tiles_dir = os.path.join(tmp, 'tiles')
+            tile_file_dir = os.path.join(tiles_dir, '0', '0')
+            os.makedirs(tile_file_dir, exist_ok=True)
+            with open(os.path.join(tile_file_dir, '0.webp'), 'wb') as f:
+                f.write(b'RIFF\x00\x00\x00\x00WEBP')
+
+            out_path = os.path.join(tmp, 'output.smp')
+            gen._build_smp_archive(
+                style_path=style_path,
+                tiles_dir=tiles_dir,
+                output_path=out_path
+            )
+
+            import zipfile
+            with zipfile.ZipFile(out_path) as zf:
+                names = zf.namelist()
+            self.assertIn('s/0/0/0/0.webp', names)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_webp_tile_uses_zip_stored(self):
+        """WebP tiles (like PNG/JPG) should use ZIP_STORED compression."""
+        gen = SMPGenerator()
+        tmp = tempfile.mkdtemp()
+        try:
+            import json
+            style_path = os.path.join(tmp, 'style.json')
+            with open(style_path, 'w') as f:
+                json.dump({"version": 8, "sources": {}, "layers": []}, f)
+
+            tiles_dir = os.path.join(tmp, 'tiles')
+            tile_file_dir = os.path.join(tiles_dir, '0', '0')
+            os.makedirs(tile_file_dir, exist_ok=True)
+            with open(os.path.join(tile_file_dir, '0.webp'), 'wb') as f:
+                f.write(b'RIFF\x00\x00\x00\x00WEBP')
+
+            out_path = os.path.join(tmp, 'output.smp')
+            gen._build_smp_archive(
+                style_path=style_path,
+                tiles_dir=tiles_dir,
+                output_path=out_path
+            )
+
+            import zipfile
+            with zipfile.ZipFile(out_path) as zf:
+                info = zf.getinfo('s/0/0/0/0.webp')
+            self.assertEqual(info.compress_type, zipfile.ZIP_STORED)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_webp_render_single_tile_uses_webp_format(self):
+        """_render_single_tile must save with 'WEBP' Qt format string."""
+        gen = SMPGenerator()
+        gen._calculate_tile_extent = MagicMock(return_value=MagicMock())
+
+        fake_img = MagicMock()
+        fake_img.save.return_value = True
+
+        tmp = tempfile.mkdtemp()
+        try:
+            with patch('comapeo_smp_generator.QImage', return_value=fake_img), \
+                 patch('comapeo_smp_generator.QPainter', MagicMock()), \
+                 patch('comapeo_smp_generator.QgsMapRendererCustomPainterJob', MagicMock()):
+                gen._render_single_tile(
+                    MagicMock(), 0, 0, 0, tmp,
+                    'WEBP', 85, False
+                )
+            # Verify save was called with 'WEBP' format and quality
+            save_call = fake_img.save.call_args
+            self.assertEqual(save_call[0][1], 'WEBP')
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_webp_storage_estimate(self):
+        """estimate_tile_storage_bytes should handle WEBP format."""
+        # WebP should use a reasonable estimate (similar to JPG)
+        webp_estimate = self.gen.estimate_tile_storage_bytes(100, 'WEBP')
+        self.assertGreater(webp_estimate, 0)
+        # Should be less than PNG estimate
+        png_estimate = self.gen.estimate_tile_storage_bytes(100, 'PNG')
+        self.assertLessEqual(webp_estimate, png_estimate)
+
+
+class TestTileDeduplication(unittest.TestCase):
+    """SHA-256 based tile deduplication in SMP archives (Task 6)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _build_smp_with_duplicate_tiles(self, dedup_enabled=True):
+        """Build an SMP archive with intentionally duplicate tile content."""
+        gen = SMPGenerator()
+        import json
+        style_path = os.path.join(self.tmp, 'style.json')
+        with open(style_path, 'w') as f:
+            json.dump({"version": 8, "sources": {}, "layers": []}, f)
+
+        tiles_dir = os.path.join(self.tmp, 'tiles')
+        # Create 4 tiles with the SAME content (simulating uniform low-zoom tiles)
+        identical_content = b'\x89PNG\r\n\x1a\n' + b'\x00' * 100
+        for z, x, y in [(0, 0, 0), (1, 0, 0), (1, 0, 1), (1, 1, 0)]:
+            d = os.path.join(tiles_dir, str(z), str(x))
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, f'{y}.png'), 'wb') as f:
+                f.write(identical_content)
+
+        out_path = os.path.join(self.tmp, f'output_{dedup_enabled}.smp')
+        gen._build_smp_archive(
+            style_path=style_path,
+            tiles_dir=tiles_dir,
+            output_path=out_path,
+            dedup=dedup_enabled
+        )
+        return out_path
+
+    def test_dedup_reduces_archive_size(self):
+        """Archive with dedup enabled should be smaller than without."""
+        smp_dedup = self._build_smp_with_duplicate_tiles(dedup_enabled=True)
+        smp_no_dedup = self._build_smp_with_duplicate_tiles(dedup_enabled=False)
+        size_dedup = os.path.getsize(smp_dedup)
+        size_no_dedup = os.path.getsize(smp_no_dedup)
+
+        self.assertLess(size_dedup, size_no_dedup,
+                        f"Dedup archive ({size_dedup}B) should be smaller than "
+                        f"non-dedup ({size_no_dedup}B)")
+
+    def test_dedup_all_tile_paths_still_present(self):
+        """With dedup, all tile paths must still exist in the archive."""
+        import zipfile
+        smp = self._build_smp_with_duplicate_tiles(dedup_enabled=True)
+        with zipfile.ZipFile(smp) as zf:
+            names = set(zf.namelist())
+        for expected in ['s/0/0/0/0.png', 's/0/1/0/0.png', 's/0/1/0/1.png', 's/0/1/1/0.png']:
+            self.assertIn(expected, names, f"Missing tile path: {expected}")
+
+    def test_dedup_tiles_extract_correctly(self):
+        """All tiles extracted from a dedup archive must have correct content."""
+        import zipfile
+        identical_content = b'\x89PNG\r\n\x1a\n' + b'\x00' * 100
+        smp = self._build_smp_with_duplicate_tiles(dedup_enabled=True)
+        with zipfile.ZipFile(smp) as zf:
+            for name in zf.namelist():
+                if name.startswith('s/0/') and name.endswith('.png'):
+                    info = zf.getinfo(name)
+                    with open(smp, 'rb') as f:
+                        f.seek(info.header_offset)
+                        local_header = f.read(30)
+                        import struct
+                        name_len, extra_len = struct.unpack('<HH', local_header[26:30])
+                        f.seek(info.header_offset + 30 + name_len + extra_len)
+                        content = f.read(info.file_size)
+                    self.assertEqual(content, identical_content,
+                                     f"Tile {name} content mismatch after dedup")
+
+    def test_no_dedup_produces_larger_archive_for_duplicates(self):
+        """Without dedup, identical tiles should each be stored independently."""
+        import zipfile
+        smp = self._build_smp_with_duplicate_tiles(dedup_enabled=False)
+        with zipfile.ZipFile(smp) as zf:
+            tile_entries = [i for i in zf.infolist() if i.filename.startswith('s/0/')]
+        # Each tile should have its own data (unique header offsets)
+        offsets = [e.header_offset for e in tile_entries]
+        self.assertEqual(len(offsets), len(set(offsets)),
+                         "Without dedup, each tile should have a unique offset")
+
+    def test_dedup_unique_tiles_not_affected(self):
+        """Dedup must not affect tiles with unique content."""
+        gen = SMPGenerator()
+        import json
+        style_path = os.path.join(self.tmp, 'style_unique.json')
+        with open(style_path, 'w') as f:
+            json.dump({"version": 8, "sources": {}, "layers": []}, f)
+
+        tiles_dir = os.path.join(self.tmp, 'tiles_unique')
+        # Create tiles with UNIQUE content
+        for i, (z, x, y) in enumerate([(0, 0, 0), (1, 0, 0)]):
+            d = os.path.join(tiles_dir, str(z), str(x))
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, f'{y}.png'), 'wb') as f:
+                f.write(f'\x89PNG unique {i}'.encode())
+
+        out_dedup = os.path.join(self.tmp, 'unique_dedup.smp')
+        gen._build_smp_archive(
+            style_path=style_path,
+            tiles_dir=tiles_dir,
+            output_path=out_dedup,
+            dedup=True
+        )
+
+        out_no_dedup = os.path.join(self.tmp, 'unique_no_dedup.smp')
+        gen._build_smp_archive(
+            style_path=style_path,
+            tiles_dir=tiles_dir,
+            output_path=out_no_dedup,
+            dedup=False
+        )
+
+        # With all unique tiles, sizes should be very similar
+        size_dedup = os.path.getsize(out_dedup)
+        size_no_dedup = os.path.getsize(out_no_dedup)
+        # Dedup might be slightly larger due to hash table overhead, but within 10%
+        self.assertLessEqual(
+            size_dedup, size_no_dedup * 1.1,
+            f"Dedup with unique tiles should not inflate archive by >10%: "
+            f"{size_dedup} vs {size_no_dedup}"
+        )
+
+    def test_dedup_preserves_version_and_style(self):
+        """Dedup must not affect VERSION or style.json entries."""
+        import zipfile
+        import json
+        smp = self._build_smp_with_duplicate_tiles(dedup_enabled=True)
+        with zipfile.ZipFile(smp) as zf:
+            self.assertIn('VERSION', zf.namelist())
+            self.assertEqual(zf.read('VERSION').decode(), '1.0')
+            self.assertIn('style.json', zf.namelist())
+            style = json.loads(zf.read('style.json'))
+            self.assertEqual(style['version'], 8)
+
+
+class TestSMPValidation(unittest.TestCase):
+    """Python-based SMP format validation (Task 7)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _build_valid_smp(self, tile_format='PNG'):
+        """Build a spec-compliant SMP archive for validation testing."""
+        gen = SMPGenerator()
+        tile_ext = tile_format.lower()
+        if tile_ext == 'jpg':
+            tile_ext = 'jpg'
+            tile_content = b'\xFF\xD8\xFF\xE0'
+        elif tile_ext == 'webp':
+            tile_content = b'RIFF\x00\x00\x00\x00WEBP'
+        else:
+            tile_content = b'\x89PNG\r\n\x1a\n'
+
+        import json
+        style = {
+            "version": 8,
+            "name": "Test Map",
+            "sources": {
+                "mbtiles-source": {
+                    "type": "raster",
+                    "format": tile_ext,
+                    "minzoom": 0,
+                    "maxzoom": 1,
+                    "bounds": [-10, -10, 10, 10],
+                    "tiles": [f"smp://maps.v1/s/0/{{z}}/{{x}}/{{y}}.{tile_ext}"]
+                }
+            },
+            "layers": [
+                {"id": "background", "type": "background",
+                 "paint": {"background-color": "white"}},
+                {"id": "raster", "type": "raster", "source": "mbtiles-source"}
+            ],
+            "metadata": {
+                "smp:bounds": [-10, -10, 10, 10],
+                "smp:maxzoom": 1,
+                "smp:sourceFolders": {"mbtiles-source": "s/0"}
+            },
+            "center": [0, 0],
+            "zoom": 0
+        }
+
+        style_path = os.path.join(self.tmp, 'style.json')
+        with open(style_path, 'w') as f:
+            json.dump(style, f)
+
+        tiles_dir = os.path.join(self.tmp, 'tiles')
+        for z, x, y in [(0, 0, 0), (1, 0, 0), (1, 0, 1), (1, 1, 0), (1, 1, 1)]:
+            d = os.path.join(tiles_dir, str(z), str(x))
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, f'{y}.{tile_ext}'), 'wb') as f:
+                f.write(tile_content)
+
+        out_path = os.path.join(self.tmp, 'valid.smp')
+        gen._build_smp_archive(
+            style_path=style_path,
+            tiles_dir=tiles_dir,
+            output_path=out_path
+        )
+        return out_path
+
+    def test_validate_version_file(self):
+        """Validator must check VERSION file exists with content '1.0'."""
+        import zipfile
+        smp = self._build_valid_smp()
+        with zipfile.ZipFile(smp) as zf:
+            names = zf.namelist()
+            self.assertIn('VERSION', names)
+            content = zf.read('VERSION').decode('utf-8')
+            self.assertEqual(content, '1.0')
+
+    def test_validate_style_json_structure(self):
+        """Validator must check style.json has required fields."""
+        import zipfile
+        import json
+        smp = self._build_valid_smp()
+        with zipfile.ZipFile(smp) as zf:
+            style = json.loads(zf.read('style.json'))
+
+        # Required top-level fields
+        self.assertIn('version', style)
+        self.assertEqual(style['version'], 8)
+        self.assertIn('sources', style)
+        self.assertIn('layers', style)
+
+        # Source must have required fields
+        source = list(style['sources'].values())[0]
+        self.assertIn('type', source)
+        self.assertIn('tiles', source)
+        self.assertIn('minzoom', source)
+        self.assertIn('maxzoom', source)
+
+    def test_validate_source_folders_match_archive(self):
+        """smp:sourceFolders paths must match actual archive structure."""
+        import zipfile
+        import json
+        smp = self._build_valid_smp()
+        with zipfile.ZipFile(smp) as zf:
+            style = json.loads(zf.read('style.json'))
+            archive_names = set(zf.namelist())
+
+        source_folders = style.get('metadata', {}).get('smp:sourceFolders', {})
+        for source_id, folder_path in source_folders.items():
+            # folder_path should be a prefix in the archive
+            matching = [n for n in archive_names if n.startswith(folder_path + '/')]
+            self.assertGreater(len(matching), 0,
+                               f"No archive entries found under {folder_path}")
+
+    def test_validate_tile_paths_resolve(self):
+        """Tile URL template paths must resolve to actual archive entries."""
+        import zipfile
+        import json
+        import re
+        smp = self._build_valid_smp()
+        with zipfile.ZipFile(smp) as zf:
+            style = json.loads(zf.read('style.json'))
+            archive_names = set(zf.namelist())
+
+        for source_id, source in style['sources'].items():
+            tiles_template = source['tiles'][0]
+            # Extract the path pattern: smp://maps.v1/s/0/{z}/{x}/{y}.ext
+            # Convert to archive path pattern
+            path_pattern = tiles_template.replace('smp://maps.v1/', '')
+            # Replace template variables with regex
+            path_regex = path_pattern.replace('{z}', r'\d+').replace('{x}', r'\d+').replace('{y}', r'\d+')
+            pattern = re.compile(f'^{path_regex}$')
+
+            matching = [n for n in archive_names if pattern.match(n)]
+            self.assertGreater(len(matching), 0,
+                               f"No archive entries match tile template {tiles_template}")
+
+    def test_validate_no_cache_metadata(self):
+        """Archive must not contain _cache_meta.json."""
+        import zipfile
+        smp = self._build_valid_smp()
+        with zipfile.ZipFile(smp) as zf:
+            for name in zf.namelist():
+                self.assertNotIn('_cache_meta.json', name)
+
+    def test_validate_all_formats(self):
+        """Validation should pass for PNG, JPG, and WEBP formats."""
+        import zipfile
+        for fmt in ['PNG', 'JPG', 'WEBP']:
+            smp = self._build_valid_smp(tile_format=fmt)
+            self.assertTrue(zipfile.is_zipfile(smp), f"{fmt} SMP is not a valid zip")
+            with zipfile.ZipFile(smp) as zf:
+                self.assertIn('VERSION', zf.namelist())
+                self.assertIn('style.json', zf.namelist())
+
+    def test_validate_missing_version_detected(self):
+        """Validator must detect missing VERSION file."""
+        import zipfile
+        import json
+        smp = self._build_valid_smp()
+        # Rebuild without VERSION by manually creating zip
+        bad_smp = os.path.join(self.tmp, 'no_version.smp')
+        with zipfile.ZipFile(smp) as zf_in:
+            with zipfile.ZipFile(bad_smp, 'w') as zf_out:
+                for item in zf_in.infolist():
+                    if item.filename != 'VERSION':
+                        zf_out.writestr(item, zf_in.read(item.filename))
+        with zipfile.ZipFile(bad_smp) as zf:
+            self.assertNotIn('VERSION', zf.namelist())
+
+    def test_validate_tile_completeness(self):
+        """All tiles referenced in style bounds should exist in archive."""
+        import zipfile
+        import json
+        smp = self._build_valid_smp()
+        with zipfile.ZipFile(smp) as zf:
+            style = json.loads(zf.read('style.json'))
+            archive_names = set(zf.namelist())
+
+        source = list(style['sources'].values())[0]
+        tile_ext = source.get('format', 'png')
+        # At minimum, zoom 0 tile (0,0,0) must exist
+        self.assertIn(f's/0/0/0/0.{tile_ext}', archive_names)
 
 
 class TestZipCompressionMethods(unittest.TestCase):

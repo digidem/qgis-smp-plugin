@@ -72,7 +72,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
     WORLD_MAX_ZOOM = 'WORLD_MAX_ZOOM'
 
     # Tile format options presented to the user
-    TILE_FORMAT_OPTIONS = ['PNG', 'JPG']
+    TILE_FORMAT_OPTIONS = ['PNG', 'JPG', 'WEBP']
 
     def initAlgorithm(self, config):
         """
@@ -129,7 +129,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
         # Add JPEG quality parameter (only meaningful when JPG is selected)
         jpeg_quality_param = QgsProcessingParameterNumber(
             self.JPEG_QUALITY,
-            self.tr('JPEG quality (1-100, only used when format is JPG)'),
+            self.tr('JPEG/WebP quality (1-100, used when format is JPG or WEBP)'),
             QgsProcessingParameterNumber.Integer,
             defaultValue=85,
             optional=True,
@@ -293,8 +293,8 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
         feedback.pushInfo(self.tr(f'Tile format: {tile_format}'))
         feedback.pushInfo(self.tr(f'Include world base zooms: {include_world_base_zooms}'))
         feedback.pushInfo(self.tr(f'World max zoom: {world_max_zoom}'))
-        if tile_format == 'JPG':
-            feedback.pushInfo(self.tr(f'JPEG quality: {jpeg_quality}'))
+        if tile_format in ('JPG', 'WEBP'):
+            feedback.pushInfo(self.tr(f'{tile_format} quality: {jpeg_quality}'))
         feedback.pushInfo(self.tr(f'Output file: {output_file}'))
 
         generator = SMPGenerator(feedback)

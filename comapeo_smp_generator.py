@@ -152,6 +152,27 @@ class SMPGenerator:
 
     TILE_FORMAT_PNG = 'PNG'
     TILE_FORMAT_JPG = 'JPG'
+    TILE_FORMAT_WEBP = 'WEBP'
+
+    @staticmethod
+    def _tile_extension(tile_format):
+        """Return the file extension for a tile format string."""
+        fmt = tile_format.upper() if tile_format else 'PNG'
+        if fmt == 'JPG':
+            return 'jpg'
+        if fmt == 'WEBP':
+            return 'webp'
+        return 'png'
+
+    @staticmethod
+    def _qt_image_format(tile_format):
+        """Return the Qt image format string for saving."""
+        fmt = tile_format.upper() if tile_format else 'PNG'
+        if fmt == 'JPG':
+            return 'JPEG'
+        if fmt == 'WEBP':
+            return 'WEBP'
+        return 'PNG'
 
     # QGIS rendering (QgsMapRendererCustomPainterJob) is not safe to call
     # concurrently from multiple threads.  This lock serialises all
@@ -290,7 +311,7 @@ class SMPGenerator:
     @staticmethod
     def _tile_paths_from_plan(tiles_by_zoom, tile_format):
         """Return manifest paths for the tiles that belong to a single export plan."""
-        tile_ext = 'jpg' if tile_format == SMPGenerator.TILE_FORMAT_JPG else 'png'
+        tile_ext = SMPGenerator._tile_extension(tile_format)
         tile_paths = set()
         for zoom, min_x, max_x, min_y, max_y, _ in tiles_by_zoom:
             for x in range(min_x, max_x + 1):
@@ -306,6 +327,9 @@ class SMPGenerator:
         """Estimate storage usage in bytes for a tile count and output format."""
         if tile_format == self.TILE_FORMAT_JPG:
             bytes_per_tile = BYTES_PER_TILE_JPG
+        elif tile_format == self.TILE_FORMAT_WEBP:
+            # WebP is typically 25-35% smaller than JPEG at similar quality
+            bytes_per_tile = int(BYTES_PER_TILE_JPG * 0.75)
         else:
             bytes_per_tile = BYTES_PER_TILE_PNG
         return tile_count * bytes_per_tile
@@ -497,15 +521,15 @@ class SMPGenerator:
             tile_format = self.TILE_FORMAT_PNG
 
         tile_format = tile_format.upper()
-        if tile_format not in (self.TILE_FORMAT_PNG, self.TILE_FORMAT_JPG):
-            raise ValueError(f"Unsupported tile format: {tile_format}. Use 'PNG' or 'JPG'.")
+        if tile_format not in (self.TILE_FORMAT_PNG, self.TILE_FORMAT_JPG, self.TILE_FORMAT_WEBP):
+            raise ValueError(f"Unsupported tile format: {tile_format}. Use 'PNG', 'JPG', or 'WEBP'.")
 
         jpeg_quality = max(1, min(100, int(jpeg_quality)))
 
         self.log(f"Generating SMP file with zoom levels {min_zoom}-{max_zoom}")
         self.log(f"Extent: {extent.asWktPolygon()}")
         self.log(f"Tile format: {tile_format}" +
-                 (f", JPEG quality: {jpeg_quality}" if tile_format == self.TILE_FORMAT_JPG else ""))
+                 (f", quality: {jpeg_quality}" if tile_format in (self.TILE_FORMAT_JPG, self.TILE_FORMAT_WEBP) else ""))
 
         # --- Pre-generation validations ---
         if export_plan is None:
@@ -631,7 +655,7 @@ class SMPGenerator:
         if tile_format is None:
             tile_format = self.TILE_FORMAT_PNG
 
-        tile_ext = 'jpg' if tile_format.upper() == self.TILE_FORMAT_JPG else 'png'
+        tile_ext = self._tile_extension(tile_format)
 
         # World low-zoom exports need source bounds that match the actual tile pyramid.
         if source_bounds is not None:
@@ -850,8 +874,8 @@ class SMPGenerator:
         if cancel_event is not None and cancel_event.is_set():
             return False
 
-        tile_ext = 'jpg' if tile_format == self.TILE_FORMAT_JPG else 'png'
-        qt_format = 'JPEG' if tile_format == self.TILE_FORMAT_JPG else 'PNG'
+        tile_ext = self._tile_extension(tile_format)
+        qt_format = self._qt_image_format(tile_format)
 
         x_dir = os.path.join(tiles_dir, str(zoom), str(x))
         os.makedirs(x_dir, exist_ok=True)
@@ -875,6 +899,7 @@ class SMPGenerator:
             img = QImage(tile_size, tile_size, QImage.Format_RGB32)
             img.fill(0xFFFFFFFF)
         else:
+            # PNG and WebP both support transparency
             img = QImage(tile_size, tile_size, QImage.Format_ARGB32)
             img.fill(0)
 
@@ -900,7 +925,7 @@ class SMPGenerator:
         if cancelled:
             return False
 
-        if tile_format == self.TILE_FORMAT_JPG:
+        if tile_format in (self.TILE_FORMAT_JPG, self.TILE_FORMAT_WEBP):
             saved = img.save(tile_path, qt_format, jpeg_quality)
         else:
             saved = img.save(tile_path, qt_format)
@@ -1083,7 +1108,7 @@ class SMPGenerator:
         self.log(f"Generated {tiles_completed} tiles from map canvas")
 
     def _build_smp_archive(self, style_path, tiles_dir, output_path,
-                           tile_paths=None):
+                           tile_paths=None, dedup=False):
         """
         Create SMP archive using style.json and a tiles directory.
 
@@ -1095,9 +1120,44 @@ class SMPGenerator:
             tiles in this set are included and internal cache metadata files
             are always excluded.  When None, all tile files are included
             (minus cache metadata).
+        :param dedup: When True, use SHA-256 hashing to store duplicate tile
+            content only once.  Tiles with identical bytes share the same
+            data in the archive, reducing file size for uniform low-zoom tiles.
         """
         self.log(f"Creating SMP archive: {output_path}")
         cancelled = False
+
+        # Collect tile files and their archive names first
+        tile_entries = []  # list of (abs_path, archive_name)
+        if not (self.feedback and self.feedback.isCanceled()):
+            for root, _, files in os.walk(tiles_dir):
+                for file in files:
+                    if self.feedback and self.feedback.isCanceled():
+                        cancelled = True
+                        break
+                    if file == TileCache.META_FILE:
+                        continue
+                    fp = os.path.join(root, file)
+                    rel = os.path.relpath(fp, tiles_dir).replace(os.sep, '/')
+                    if tile_paths is not None and rel not in tile_paths:
+                        continue
+                    tile_entries.append((fp, 's/0/' + rel))
+                if cancelled:
+                    break
+
+        if cancelled:
+            try:
+                os.unlink(output_path)
+            except OSError:
+                pass
+            return False
+
+        if dedup and tile_entries:
+            self._build_smp_archive_dedup(
+                style_path, tile_entries, output_path
+            )
+            return True
+
         with zipfile.ZipFile(output_path, 'w') as zipf:
             if self.feedback and self.feedback.isCanceled():
                 cancelled = True
@@ -1106,25 +1166,12 @@ class SMPGenerator:
                            compress_type=zipfile.ZIP_DEFLATED)
                 zipf.writestr('VERSION', '1.0')
             if not cancelled:
-                for root, _, files in os.walk(tiles_dir):
-                    for file in files:
-                        if self.feedback and self.feedback.isCanceled():
-                            cancelled = True
-                            break
-                        # Never package internal cache metadata
-                        if file == TileCache.META_FILE:
-                            continue
-                        fp = os.path.join(root, file)
-                        rel = os.path.relpath(fp, tiles_dir).replace(os.sep, '/')
-                        # When a tile manifest is provided, skip stale tiles
-                        if tile_paths is not None and rel not in tile_paths:
-                            continue
-                        # Raster tiles (PNG/JPG) are already compressed;
-                        # use ZIP_STORED to avoid double-compression overhead.
-                        zipf.write(fp, 's/0/' + rel,
-                                   compress_type=zipfile.ZIP_STORED)
-                    if cancelled:
+                for fp, arcname in tile_entries:
+                    if self.feedback and self.feedback.isCanceled():
+                        cancelled = True
                         break
+                    zipf.write(fp, arcname,
+                               compress_type=zipfile.ZIP_STORED)
 
         if cancelled:
             try:
@@ -1133,6 +1180,209 @@ class SMPGenerator:
                 pass
             return False
         return True
+
+    def _build_smp_archive_dedup(self, style_path, tile_entries, output_path):
+        """Build an SMP archive with SHA-256 tile deduplication.
+
+        Tiles with identical content are stored only once.  Duplicate
+        entries are created in the ZIP central directory that point to
+        the same local file header, so all tile paths resolve correctly
+        when extracted while saving disk space for duplicate content.
+
+        :param style_path: Path to style.json
+        :param tile_entries: List of (abs_path, archive_name) tuples
+        :param output_path: Output path for SMP archive
+        """
+        import struct
+
+        # Phase 1: Hash all tiles and group by content
+        hash_to_data = {}  # sha256 -> (bytes, first_arcname)
+        hash_by_arcname = {}  # arcname -> sha256
+        unique_order = []  # ordered list of unique hashes
+
+        for fp, arcname in tile_entries:
+            with open(fp, 'rb') as fh:
+                data = fh.read()
+            content_hash = hashlib.sha256(data).hexdigest()
+            hash_by_arcname[arcname] = content_hash
+            if content_hash not in hash_to_data:
+                hash_to_data[content_hash] = (data, arcname)
+                unique_order.append(content_hash)
+
+        num_duplicates = len(tile_entries) - len(unique_order)
+        self.log(
+            f"Dedup: {len(unique_order)} unique tiles, "
+            f"{num_duplicates} duplicates"
+        )
+
+        # Phase 2: Build the ZIP file manually for offset control
+        # We write local file headers + data for unique tiles, then
+        # create a central directory with entries for ALL tiles (including
+        # duplicates pointing to the same offset as their unique original).
+        with open(output_path, 'wb') as f:
+            local_headers = []  # (offset, arcname, crc32, compressed_size, uncompressed_size)
+
+            # Write style.json
+            with open(style_path, 'rb') as sf:
+                style_data = sf.read()
+            style_crc = zipfile.crc32(style_data) & 0xFFFFFFFF
+            style_compressed = zipfile.ZipFile.writestr  # We'll use deflated
+            # Use zlib for compression (raw deflate without zlib headers)
+            import zlib
+            compressor = zlib.compressobj(6, zlib.DEFLATED, -15)
+            style_compressed = compressor.compress(style_data) + compressor.flush()
+            offset = f.tell()
+            # Local file header for style.json
+            local_header = struct.pack(
+                '<IHHHHHIIIHH',
+                0x04034b50,  # Local file header signature
+                20,  # Version needed
+                0,  # General purpose bit flag
+                8,  # Compression method: deflate
+                0,  # Last mod time
+                0,  # Last mod date
+                style_crc,
+                len(style_compressed),
+                len(style_data),
+                len('style.json'),
+                0  # Extra field length
+            )
+            f.write(local_header)
+            f.write(b'style.json')
+            f.write(style_compressed)
+            local_headers.append((offset, 'style.json', style_crc, len(style_compressed), len(style_data)))
+
+            # Write VERSION
+            version_data = b'1.0'
+            version_crc = zipfile.crc32(version_data) & 0xFFFFFFFF
+            offset = f.tell()
+            local_header = struct.pack(
+                '<IHHHHHIIIHH',
+                0x04034b50, 20, 0,
+                0,  # ZIP_STORED
+                0, 0,
+                version_crc,
+                len(version_data),
+                len(version_data),
+                len('VERSION'),
+                0
+            )
+            f.write(local_header)
+            f.write(b'VERSION')
+            f.write(version_data)
+            local_headers.append((offset, 'VERSION', version_crc, len(version_data), len(version_data)))
+
+            # Write unique tiles and record offsets
+            hash_to_offset = {}  # sha256 -> (offset, crc, size)
+            for content_hash in unique_order:
+                data, first_arcname = hash_to_data[content_hash]
+                arcname_bytes = first_arcname.encode('utf-8')
+                crc = zipfile.crc32(data) & 0xFFFFFFFF
+                offset = f.tell()
+                local_header = struct.pack(
+                    '<IHHHHHIIIHH',
+                    0x04034b50, 20, 0,
+                    0,  # ZIP_STORED
+                    0, 0,
+                    crc,
+                    len(data),
+                    len(data),
+                    len(arcname_bytes),
+                    0
+                )
+                f.write(local_header)
+                f.write(arcname_bytes)
+                f.write(data)
+                hash_to_offset[content_hash] = (offset, crc, len(data), len(data), len(arcname_bytes))
+                local_headers.append((offset, first_arcname, crc, len(data), len(data)))
+
+            # Build central directory with ALL entries (including duplicates)
+            central_dir_entries = []
+
+            # style.json entry
+            cd_entry = self._make_central_dir_entry(
+                'style.json', local_headers[0], 8  # deflate
+            )
+            central_dir_entries.append(cd_entry)
+
+            # VERSION entry
+            cd_entry = self._make_central_dir_entry(
+                'VERSION', local_headers[1], 0  # stored
+            )
+            central_dir_entries.append(cd_entry)
+
+            # Tile entries (unique + duplicates)
+            for fp, arcname in tile_entries:
+                content_hash = hash_by_arcname[arcname]
+                offset_info = hash_to_offset[content_hash]
+                cd_entry = self._make_central_dir_entry(arcname, offset_info, 0)
+                central_dir_entries.append(cd_entry)
+
+            # Write central directory
+            cd_offset = f.tell()
+            for entry in central_dir_entries:
+                f.write(entry)
+            cd_size = f.tell() - cd_offset
+
+            # Write end of central directory record
+            eocd = struct.pack(
+                '<IHHHHIIH',
+                0x06054b50,  # EOCD signature
+                0,  # Disk number
+                0,  # Disk with CD
+                len(central_dir_entries),  # Entries on this disk
+                len(central_dir_entries),  # Total entries
+                cd_size,
+                cd_offset,
+                0  # Comment length
+            )
+            f.write(eocd)
+
+        return True
+
+    @staticmethod
+    def _make_central_dir_entry(arcname, offset_info, compress_method):
+        """Create a central directory entry for a ZIP file.
+
+        :param arcname: Archive entry name
+        :param offset_info: Tuple of (local_header_offset, crc32,
+            compressed_size, uncompressed_size, name_length) OR
+            (local_header_offset, arcname, crc32, compressed_size, uncompressed_size)
+        :param compress_method: Compression method (0=stored, 8=deflate)
+        :return: Bytes of the central directory entry
+        """
+        import struct as _struct
+        arcname_bytes = arcname.encode('utf-8')
+
+        if len(offset_info) == 5 and isinstance(offset_info[1], str):
+            # From local_headers format: (offset, name, crc, compressed, uncompressed)
+            local_offset, _, crc, compressed_size, uncompressed_size = offset_info
+        elif len(offset_info) == 5:
+            # From hash_to_offset format: (offset, crc, compressed, uncompressed, name_len)
+            local_offset, crc, compressed_size, uncompressed_size, _ = offset_info
+        else:
+            raise ValueError(f"Unexpected offset_info format: {offset_info}")
+
+        return _struct.pack(
+            '<IHHHHHHIIIHHHHHII',
+            0x02014b50,  # Central directory file header signature
+            20,  # Version made by
+            20,  # Version needed to extract
+            0,  # General purpose bit flag
+            compress_method,
+            0, 0,  # Last mod file time and date
+            crc,
+            compressed_size,
+            uncompressed_size,
+            len(arcname_bytes),
+            0,  # Extra field length
+            0,  # File comment length
+            0,  # Disk number start
+            0,  # Internal file attributes
+            0,  # External file attributes
+            local_offset
+        ) + arcname_bytes
+
 
     def _calculate_tile_extent(self, xtile, ytile, zoom):
         """
