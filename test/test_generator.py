@@ -249,6 +249,111 @@ class TestEstimateTileCount(unittest.TestCase):
         self.assertLess(count, 500)
 
 
+
+
+class TestWorldBaseZooms(unittest.TestCase):
+    """Tests for world-base-zooms tile estimation behavior."""
+
+    def setUp(self):
+        self.gen = SMPGenerator()
+        self.gen._get_bounds_wgs84 = lambda ext: [
+            ext.xMinimum(), ext.yMinimum(), ext.xMaximum(), ext.yMaximum()
+        ]
+        self.world_extent = _FakeRectangle(-180, -85.0511, 180, 85.0511)
+        self.user_extent = _FakeRectangle(-1, -1, 1, 1)
+        self.gen.get_world_extent = lambda: self.world_extent
+
+    def test_world_tile_count_math(self):
+        self.assertEqual(self.gen.estimate_world_tile_count(0, 0), 1)
+        self.assertEqual(self.gen.estimate_world_tile_count(0, 2), 21)
+        self.assertEqual(self.gen.estimate_world_tile_count(0, 5), 1365)
+
+    def test_mixed_export_between_extent_only_and_full_world(self):
+        min_zoom = 0
+        max_zoom = 5
+        extent_only_count = self.gen.estimate_mixed_tile_count(
+            self.user_extent, min_zoom, max_zoom, include_world_base_zooms=False
+        )
+        mixed_count = self.gen.estimate_mixed_tile_count(
+            self.user_extent,
+            min_zoom,
+            max_zoom,
+            include_world_base_zooms=True,
+            world_max_zoom=4
+        )
+        world_count = self.gen.estimate_world_tile_count(min_zoom, max_zoom)
+
+        self.assertGreater(mixed_count, extent_only_count)
+        self.assertLessEqual(mixed_count, world_count)
+
+    def test_enabled_world_coverage_applies_through_world_max_zoom(self):
+        min_zoom = 0
+        max_zoom = 5
+        mixed_count = self.gen.estimate_mixed_tile_count(
+            self.user_extent,
+            min_zoom,
+            max_zoom,
+            include_world_base_zooms=True,
+            world_max_zoom=3
+        )
+        expected = (
+            self.gen.estimate_world_tile_count(0, 3)
+            + self.gen.estimate_mixed_tile_count(
+                self.user_extent, 4, 5, include_world_base_zooms=False
+            )
+        )
+        self.assertEqual(mixed_count, expected)
+
+    def test_disabled_mode_matches_original_logic(self):
+        min_zoom = 1
+        max_zoom = 6
+        original = self.gen.estimate_tile_count(self.user_extent, min_zoom, max_zoom)
+        disabled = self.gen.estimate_mixed_tile_count(
+            self.user_extent,
+            min_zoom,
+            max_zoom,
+            include_world_base_zooms=False
+        )
+        self.assertEqual(disabled, original)
+
+    def test_world_max_zoom_values_for_enabled_mode(self):
+        extent = self.user_extent
+        count_three, _ = self.gen.validate_tile_count(
+            extent, 0, 5, include_world_base_zooms=True, world_max_zoom=3
+        )
+        count_five, _ = self.gen.validate_tile_count(
+            extent, 0, 5, include_world_base_zooms=True, world_max_zoom=5
+        )
+        self.assertGreaterEqual(count_five, count_three)
+
+
+    def test_enabled_mode_adds_world_zooms_below_selected_min_zoom(self):
+        mixed_count = self.gen.estimate_mixed_tile_count(
+            self.user_extent,
+            6,
+            7,
+            include_world_base_zooms=True,
+            world_max_zoom=3
+        )
+        expected = (
+            self.gen.estimate_world_tile_count(0, 3)
+            + self.gen.estimate_mixed_tile_count(
+                self.user_extent, 6, 7, include_world_base_zooms=False
+            )
+        )
+        self.assertEqual(mixed_count, expected)
+
+    def test_world_zoom_selection_helper_enforces_world_0_to_2(self):
+        custom_world = _FakeRectangle(-180, -85, 180, 85)
+        chosen_at_zoom2 = self.gen._get_extent_for_zoom(
+            self.user_extent, custom_world, 2, include_world_base_zooms=True, world_max_zoom=3
+        )
+        chosen_at_zoom4 = self.gen._get_extent_for_zoom(
+            self.user_extent, custom_world, 4, include_world_base_zooms=True, world_max_zoom=3
+        )
+        self.assertIs(chosen_at_zoom2, custom_world)
+        self.assertIs(chosen_at_zoom4, self.user_extent)
+
 class TestValidateTileCount(unittest.TestCase):
     """Test validate_tile_count raises/warns correctly."""
 
@@ -382,6 +487,21 @@ class TestTileGridRects(unittest.TestCase):
         estimated = self.gen.estimate_tile_count(extent, 0, 3)
         self.assertEqual(len(rects), estimated)
 
+    def test_rect_count_matches_world_enabled_estimate(self):
+        extent = self._make_extent(-1, -1, 1, 1)
+        self.gen.get_world_extent = MagicMock(return_value=_FakeRectangle(-180, -85, 180, 85))
+        rects = self.gen.get_tile_grid_rects(
+            extent, 6, 7,
+            include_world_base_zooms=True,
+            world_max_zoom=3
+        )
+        estimated = self.gen.estimate_tile_count(
+            extent, 6, 7,
+            include_world_base_zooms=True,
+            world_max_zoom=3
+        )
+        self.assertEqual(len(rects), estimated)
+
     def test_wgs84_bounds_ordering(self):
         """Each rect must satisfy west < east and south < north."""
         extent = self._make_extent(-20, -20, 20, 20)
@@ -492,6 +612,17 @@ class TestCreateStyleJson(unittest.TestCase):
         style = self.gen._create_style_from_canvas(self._make_extent(), 10, 10)
         self.assertEqual(style['zoom'], 10)
 
+    def test_style_minzoom_uses_zero_when_world_base_zooms_enabled(self):
+        style = self.gen._create_style_from_canvas(
+            self._make_extent(), 6, 12,
+            include_world_base_zooms=True,
+            world_max_zoom=3
+        )
+        source = list(style['sources'].values())[0]
+        self.assertEqual(source['minzoom'], 0)
+        self.assertEqual(source['maxzoom'], 12)
+        self.assertEqual(source['bounds'], [-180.0, -85.0511, 180.0, 85.0511])
+
 
 class TestCalculateTilesAtZoom(unittest.TestCase):
     """Test tile range calculations."""
@@ -566,6 +697,52 @@ class TestCalculateTilesAtZoom(unittest.TestCase):
         self.assertGreater(count, 0)
 
 
+
+
+class TestWorldBaseZoomGeneration(unittest.TestCase):
+    """Generation path should include world base zooms below selected min zoom."""
+
+    def test_generation_uses_effective_zoom_set_when_world_enabled(self):
+        gen = SMPGenerator()
+        feedback = MagicMock()
+        feedback.isCanceled.return_value = False
+        gen.feedback = feedback
+
+        seen_zooms = []
+
+        def _record_zoom(_extent, zoom):
+            seen_zooms.append(zoom)
+            return [(0, 0, 0, 0)]
+
+        gen._calculate_tiles_at_zoom = MagicMock(side_effect=_record_zoom)
+        gen.get_world_extent = MagicMock(return_value=_FakeRectangle(-180, -85, 180, 85))
+
+        import comapeo_smp_generator as _mod
+        fake_img = MagicMock()
+        fake_img.save = MagicMock()
+
+        with patch.object(_mod, 'QgsMapSettings', MagicMock()), \
+             patch.object(_mod, 'QgsProject', _FakeProject), \
+             patch('comapeo_smp_generator.QImage', return_value=fake_img), \
+             patch('comapeo_smp_generator.QPainter', return_value=MagicMock()), \
+             patch('comapeo_smp_generator.QgsMapRendererCustomPainterJob', return_value=MagicMock()):
+
+            tmp = tempfile.mkdtemp()
+            try:
+                gen._generate_tiles_from_canvas(
+                    _FakeRectangle(-1, -1, 1, 1),
+                    6,
+                    7,
+                    tmp,
+                    tile_format='PNG',
+                    include_world_base_zooms=True,
+                    world_max_zoom=3
+                )
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+
+        self.assertEqual(sorted(set(seen_zooms)), [0, 1, 2, 3, 6, 7])
+
 class TestProgressSmoothing(unittest.TestCase):
     """Progress setProgress() should only be called when pct changes."""
 
@@ -639,6 +816,140 @@ class TestProgressSmoothing(unittest.TestCase):
         feedback.isCanceled.assert_called()
         # With immediate cancellation, far fewer than 100 setProgress calls expected
         self.assertLess(feedback.setProgress.call_count, 100)
+
+    def test_tile_submission_is_bounded_while_reporting_progress(self):
+        """Large exports should not queue every tile before progress can advance."""
+        gen = SMPGenerator()
+        feedback = MagicMock()
+        feedback.isCanceled.return_value = False
+        gen.feedback = feedback
+
+        gen._calculate_tiles_at_zoom = MagicMock(return_value=[(0, 9, 0, 9)])  # 100 tiles
+        gen._render_single_tile = MagicMock(return_value=True)
+
+        import comapeo_smp_generator as _mod
+
+        executors = []
+
+        class _FakeFuture:
+            def __init__(self, value):
+                self._value = value
+
+            def result(self):
+                return self._value
+
+            def cancel(self):
+                return True
+
+        class _FakeExecutor:
+            def __init__(self, *args, **kwargs):
+                self.pending = []
+                self.max_pending = 0
+                executors.append(self)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def submit(self, fn, *args):
+                future = _FakeFuture(fn(*args))
+                self.pending.append(future)
+                self.max_pending = max(self.max_pending, len(self.pending))
+                return future
+
+        def _fake_wait(futures, return_when=None, timeout=None):
+            executor = executors[0]
+            future = futures[0]
+            executor.pending.remove(future)
+            return {future}, set(futures[1:])
+
+        with patch.object(_mod, 'QgsMapSettings', MagicMock()), \
+             patch.object(_mod, 'QgsProject', _FakeProject), \
+             patch.object(_mod, 'ThreadPoolExecutor', _FakeExecutor), \
+             patch.object(_mod, 'wait', side_effect=_fake_wait):
+
+            tmp = tempfile.mkdtemp()
+            try:
+                gen._generate_tiles_from_canvas(
+                    _FakeRectangle(0, 0, 1, 1), 0, 0, tmp, tile_format='PNG',
+                    max_workers=2
+                )
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+
+        self.assertEqual(len(executors), 1)
+        self.assertLessEqual(executors[0].max_pending, 4)
+        self.assertGreater(feedback.setProgress.call_count, 1)
+
+    def test_wait_timeout_path_can_cancel_without_completed_futures(self):
+        """A non-completing future must not trap the coordinator in wait()."""
+        gen = SMPGenerator()
+        feedback = MagicMock()
+        feedback.isCanceled.return_value = False
+        gen.feedback = feedback
+
+        gen._calculate_tiles_at_zoom = MagicMock(return_value=[(0, 0, 0, 0)])
+        gen._render_single_tile = MagicMock(return_value=True)
+
+        import comapeo_smp_generator as _mod
+
+        executors = []
+
+        class _FakeFuture:
+            def __init__(self, value):
+                self._value = value
+                self.cancelled = False
+
+            def result(self):
+                return self._value
+
+            def cancel(self):
+                self.cancelled = True
+                return True
+
+        class _FakeExecutor:
+            def __init__(self, *args, **kwargs):
+                self.pending = []
+                executors.append(self)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def submit(self, fn, *args):
+                future = _FakeFuture(fn(*args))
+                self.pending.append(future)
+                return future
+
+        wait_calls = {'count': 0}
+
+        def _fake_wait(futures, return_when=None, timeout=None):
+            wait_calls['count'] += 1
+            if wait_calls['count'] == 1:
+                feedback.isCanceled.return_value = True
+                return set(), set(futures)
+            raise AssertionError('Coordinator kept waiting after cancellation with no completed futures')
+
+        with patch.object(_mod, 'QgsMapSettings', MagicMock()), \
+             patch.object(_mod, 'QgsProject', _FakeProject), \
+             patch.object(_mod, 'ThreadPoolExecutor', _FakeExecutor), \
+             patch.object(_mod, 'wait', side_effect=_fake_wait):
+
+            tmp = tempfile.mkdtemp()
+            try:
+                gen._generate_tiles_from_canvas(
+                    _FakeRectangle(0, 0, 1, 1), 0, 0, tmp, tile_format='PNG',
+                    max_workers=1
+                )
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+
+        self.assertEqual(wait_calls['count'], 1)
+        self.assertTrue(executors[0].pending[0].cancelled)
 
 
 class TestParallelTileRendering(unittest.TestCase):
@@ -886,6 +1197,57 @@ class TestCacheDirectory(unittest.TestCase):
             shutil.rmtree(cache, ignore_errors=True)
             shutil.rmtree(out_dir, ignore_errors=True)
 
+    def test_generate_with_cache_dir_includes_world_low_zoom_tiles_in_manifest(self):
+        """Cache-backed exports must archive world tiles added below selected min zoom."""
+        gen = SMPGenerator()
+        gen.validate_tile_count = MagicMock(return_value=(6, None))
+        gen.validate_extent_size = MagicMock(return_value=None)
+        gen.validate_disk_space = MagicMock()
+        gen._get_bounds_wgs84 = MagicMock(return_value=[-1, -1, 1, 1])
+        gen._create_style_from_canvas = MagicMock(return_value={"version": 8})
+        gen._generate_tiles_from_canvas = MagicMock()
+        gen._calculate_tiles_at_zoom = MagicMock(return_value=[(0, 0, 0, 0)])
+        gen.get_world_extent = MagicMock(return_value=_FakeRectangle(-180, -85, 180, 85))
+
+        cache = tempfile.mkdtemp()
+        out_dir = tempfile.mkdtemp()
+        try:
+            import json
+            current_tiles = [(0, 0, 0), (1, 0, 0), (2, 0, 0), (3, 0, 0), (6, 0, 0), (7, 0, 0)]
+            stale_tiles = [(5, 0, 0)]
+
+            for zoom, x, y in current_tiles + stale_tiles:
+                tile_dir = os.path.join(cache, str(zoom), str(x))
+                os.makedirs(tile_dir, exist_ok=True)
+                with open(os.path.join(tile_dir, f'{y}.png'), 'wb') as fh:
+                    fh.write(b'\x89PNG')
+
+            with open(os.path.join(cache, TileCache.META_FILE), 'w') as fh:
+                json.dump({f"{z}/{x}/{y}": "PNG:85:any" for z, x, y in current_tiles}, fh)
+
+            out_path = os.path.join(out_dir, 'world-cache.smp')
+            gen.generate_smp_from_canvas(
+                _FakeRectangle(-1, -1, 1, 1),
+                6,
+                7,
+                out_path,
+                cache_dir=cache,
+                include_world_base_zooms=True,
+                world_max_zoom=3
+            )
+
+            import zipfile
+            with zipfile.ZipFile(out_path) as zf:
+                names = set(zf.namelist())
+
+            for zoom, x, y in current_tiles:
+                self.assertIn(f's/0/{zoom}/{x}/{y}.png', names)
+            self.assertNotIn('s/0/5/0/0.png', names)
+            self.assertNotIn(f's/0/{TileCache.META_FILE}', names)
+        finally:
+            shutil.rmtree(cache, ignore_errors=True)
+            shutil.rmtree(out_dir, ignore_errors=True)
+
 
 class TestLowZoomStyleOutput(unittest.TestCase):
     """default_zoom in style.json must never be negative."""
@@ -964,18 +1326,22 @@ class TestCancelEventInRenderSingleTile(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-    def test_mid_render_cancellation_aborts_job(self):
+    def test_post_render_cancellation_skips_save(self):
+        """When cancellation is signalled while a render job is in progress,
+        _render_single_tile should skip saving the tile after the job finishes."""
         gen = SMPGenerator()
         gen._calculate_tile_extent = MagicMock(return_value=MagicMock())
 
         fake_img = MagicMock()
         fake_job = MagicMock()
-        fake_job.isActive.side_effect = [True, False]
-        fake_job.cancelWithoutBlocking = MagicMock()
 
         feedback = MagicMock()
-        feedback.isCanceled.side_effect = [False, True]
+        # First call: cancel_event check (not set) → enters render_lock
+        # Second call: post-render cancellation check → True
+        feedback.isCanceled.return_value = True
         gen.feedback = feedback
+
+        cancel_event = threading.Event()
 
         tmp = tempfile.mkdtemp()
         try:
@@ -986,10 +1352,9 @@ class TestCancelEventInRenderSingleTile(unittest.TestCase):
                 result = gen._render_single_tile(
                     MagicMock(), 0, 0, 0, tmp,
                     'PNG', 85, False,
-                    cancel_event=threading.Event()
+                    cancel_event=cancel_event
                 )
             self.assertFalse(result)
-            fake_job.cancelWithoutBlocking.assert_called_once()
             fake_img.save.assert_not_called()
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -1451,6 +1816,7 @@ class TestCheckParameterValues(unittest.TestCase):
         qgis_core.QgsProcessingParameterNumber = MagicMock()
         qgis_core.QgsProcessingParameterEnum = MagicMock()
         qgis_core.QgsProcessingParameterFileDestination = MagicMock()
+        qgis_core.QgsProcessingParameterBoolean = MagicMock()
         qgis_core.QgsProcessingException = Exception
         qgis_core.QgsMapRendererCustomPainterJob = MagicMock()
 
@@ -1504,6 +1870,7 @@ class TestCheckParameterValues(unittest.TestCase):
         algo.parameterAsExtent = MagicMock(return_value=extent)
         algo.parameterAsInt = MagicMock(side_effect=lambda p, k, c: 0 if k == 'MIN_ZOOM' else 5)
         algo.parameterAsEnum = MagicMock(return_value=0)
+        algo.parameterAsBool = MagicMock(return_value=False)
         algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
 
         # Patch generator validations to pass silently
@@ -1521,6 +1888,7 @@ class TestCheckParameterValues(unittest.TestCase):
         extent = self._make_extent(0, 0, 1, 1)
         algo.parameterAsExtent = MagicMock(return_value=extent)
         algo.parameterAsInt = MagicMock(side_effect=lambda p, k, c: 0 if k == 'MIN_ZOOM' else 5)
+        algo.parameterAsBool = MagicMock(return_value=False)
         algo.parameterAsEnum = MagicMock(return_value=None)
         algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
 
@@ -1535,6 +1903,7 @@ class TestCheckParameterValues(unittest.TestCase):
         algo.parameterAsInt = MagicMock(side_effect=lambda p, k, c: 10 if k == 'MIN_ZOOM' else 5)
         algo.parameterAsEnum = MagicMock(return_value=0)
         algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
+        algo.parameterAsBool = MagicMock(return_value=False)
 
         ok, msg = algo.checkParameterValues({}, MagicMock())
 
@@ -1549,6 +1918,7 @@ class TestCheckParameterValues(unittest.TestCase):
         algo.parameterAsInt = MagicMock(side_effect=lambda p, k, c: 0 if k == 'MIN_ZOOM' else 5)
         algo.parameterAsEnum = MagicMock(return_value=0)
         algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
+        algo.parameterAsBool = MagicMock(return_value=False)
 
         import comapeo_smp_generator as _gen_mod
         with patch.object(_gen_mod.SMPGenerator, 'validate_tile_count',
@@ -1564,6 +1934,7 @@ class TestCheckParameterValues(unittest.TestCase):
         algo = self._make_algorithm()
         algo.parameterAsExtent = MagicMock(return_value=self._make_extent(0, 0, 1, 1))
         algo.parameterAsInt = MagicMock(side_effect=lambda p, k, c: 0 if k == 'MIN_ZOOM' else 5)
+        algo.parameterAsBool = MagicMock(return_value=False)
         algo.parameterAsEnum = MagicMock(return_value=None)
         algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
 
@@ -1578,10 +1949,27 @@ class TestCheckParameterValues(unittest.TestCase):
         empty_ext.isEmpty = MagicMock(return_value=True)
         algo.parameterAsExtent = MagicMock(return_value=empty_ext)
         algo.parameterAsInt = MagicMock(side_effect=lambda p, k, c: 0 if k == 'MIN_ZOOM' else 5)
+        algo.parameterAsBool = MagicMock(return_value=False)
 
         ok, msg = algo.checkParameterValues({}, MagicMock())
 
         self.assertTrue(ok)
+
+
+    def test_world_max_zoom_out_of_range_fails_when_enabled(self):
+        """Enabled world-base-zooms must reject values outside 3..5."""
+        algo = self._make_algorithm()
+        extent = self._make_extent(0, 0, 1, 1)
+        algo.parameterAsExtent = MagicMock(return_value=extent)
+        algo.parameterAsInt = MagicMock(
+            side_effect=lambda p, k, c: 0 if k == 'MIN_ZOOM' else (6 if k == 'WORLD_MAX_ZOOM' else 5)
+        )
+        algo.parameterAsBool = MagicMock(return_value=True)
+
+        ok, msg = algo.checkParameterValues({}, MagicMock())
+
+        self.assertFalse(ok)
+        self.assertIn('between 3 and 5', msg)
 
 
 class TestPluginLifecycle(unittest.TestCase):

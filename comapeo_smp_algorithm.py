@@ -36,6 +36,7 @@ from qgis.core import (QgsProcessingAlgorithm,
                        QgsProcessingParameterNumber,
                        QgsProcessingParameterEnum,
                        QgsProcessingParameterFileDestination,
+                       QgsProcessingParameterBoolean,
                        QgsProcessingException,
                        QgsRectangle)
 
@@ -67,6 +68,8 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
     TILE_FORMAT = 'TILE_FORMAT'
     JPEG_QUALITY = 'JPEG_QUALITY'
     OUTPUT_FILE = 'OUTPUT_FILE'
+    INCLUDE_WORLD_BASE_ZOOMS = 'INCLUDE_WORLD_BASE_ZOOMS'
+    WORLD_MAX_ZOOM = 'WORLD_MAX_ZOOM'
 
     # Tile format options presented to the user
     TILE_FORMAT_OPTIONS = ['PNG', 'JPG']
@@ -135,6 +138,28 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
         )
         self.addParameter(jpeg_quality_param)
 
+
+        self.addParameter(
+            QgsProcessingParameterBoolean(
+                self.INCLUDE_WORLD_BASE_ZOOMS,
+                self.tr('Include world tiles for low zoom levels'),
+                defaultValue=False,
+                optional=False
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.WORLD_MAX_ZOOM,
+                self.tr('World low-zoom coverage (3-5)'),
+                QgsProcessingParameterNumber.Integer,
+                defaultValue=3,
+                optional=False,
+                minValue=3,
+                maxValue=5
+            )
+        )
+
         # Add output file parameter
         self.addParameter(
             QgsProcessingParameterFileDestination(
@@ -165,6 +190,13 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                     min_zoom, max_zoom)
             )
 
+        include_world_base_zooms = self.parameterAsBool(
+            parameters, self.INCLUDE_WORLD_BASE_ZOOMS, context
+        )
+        world_max_zoom = self.parameterAsInt(parameters, self.WORLD_MAX_ZOOM, context)
+        if include_world_base_zooms and (world_max_zoom < 3 or world_max_zoom > 5):
+            return False, self.tr('World low-zoom coverage must be between 3 and 5.')
+
         # Retrieve extent — if unset, let processAlgorithm handle it
         extent = self.parameterAsExtent(parameters, self.EXTENT, context)
         if extent is None or extent.isEmpty():
@@ -185,7 +217,13 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
         # Instantiate generator without feedback (logs go to QgsMessageLog only)
         generator = SMPGenerator()
 
-        tile_count, _warning = generator.validate_tile_count(extent, min_zoom, max_zoom)
+        tile_count, _warning = generator.validate_tile_count(
+            extent,
+            min_zoom,
+            max_zoom,
+            include_world_base_zooms=include_world_base_zooms,
+            world_max_zoom=world_max_zoom
+        )
 
         # Block if the output drive has insufficient space
         output_file = self.parameterAsFileOutput(parameters, self.OUTPUT_FILE, context)
@@ -208,6 +246,11 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
         # Get the min and max zoom parameters
         min_zoom = self.parameterAsInt(parameters, self.MIN_ZOOM, context)
         max_zoom = self.parameterAsInt(parameters, self.MAX_ZOOM, context)
+
+        include_world_base_zooms = self.parameterAsBool(
+            parameters, self.INCLUDE_WORLD_BASE_ZOOMS, context
+        )
+        world_max_zoom = self.parameterAsInt(parameters, self.WORLD_MAX_ZOOM, context)
 
         # Get tile format
         tile_format_index = self.parameterAsEnum(parameters, self.TILE_FORMAT, context)
@@ -235,6 +278,11 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                 self.tr('Minimum zoom level must be less than or equal to maximum zoom level.')
             )
 
+        if include_world_base_zooms and (world_max_zoom < 3 or world_max_zoom > 5):
+            raise QgsProcessingException(
+                self.tr('World low-zoom coverage must be between 3 and 5.')
+            )
+
         # Log the parameters for debugging
         feedback.pushInfo(
             self.tr('Using visible project layers in layer-tree order for rendering')
@@ -243,9 +291,32 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
         feedback.pushInfo(self.tr(f'Min zoom: {min_zoom}'))
         feedback.pushInfo(self.tr(f'Max zoom: {max_zoom}'))
         feedback.pushInfo(self.tr(f'Tile format: {tile_format}'))
+        feedback.pushInfo(self.tr(f'Include world base zooms: {include_world_base_zooms}'))
+        feedback.pushInfo(self.tr(f'World max zoom: {world_max_zoom}'))
         if tile_format == 'JPG':
             feedback.pushInfo(self.tr(f'JPEG quality: {jpeg_quality}'))
         feedback.pushInfo(self.tr(f'Output file: {output_file}'))
+
+        generator = SMPGenerator(feedback)
+
+        export_plan = generator._build_export_plan(
+            extent,
+            min_zoom,
+            max_zoom,
+            include_world_base_zooms=include_world_base_zooms,
+            world_max_zoom=world_max_zoom
+        )
+        estimated_tiles = export_plan['total_tiles']
+        estimated_bytes = generator.estimate_tile_storage_bytes(estimated_tiles, tile_format)
+        estimated_mb = estimated_bytes / (1024 * 1024)
+        feedback.pushInfo(self.tr(f'Estimated tile count: {estimated_tiles:,}'))
+        feedback.pushInfo(self.tr(f'Estimated size: {estimated_mb:.1f} MB'))
+        feedback.pushInfo(
+            self.tr(
+                f"Estimated world pyramid coverage: {export_plan['world_pct']:.2f}% "
+                f"({estimated_tiles:,}/{export_plan['world_tiles']:,} tiles)"
+            )
+        )
 
         # Create a rectangle from the extent
         rect = QgsRectangle(
@@ -256,12 +327,13 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
         )
 
         # Generate the SMP file
-        generator = SMPGenerator(feedback)
-
         try:
             output_path = generator.generate_smp_from_canvas(
                 rect, min_zoom, max_zoom, output_file,
-                tile_format=tile_format, jpeg_quality=jpeg_quality
+                tile_format=tile_format, jpeg_quality=jpeg_quality,
+                include_world_base_zooms=include_world_base_zooms,
+                world_max_zoom=world_max_zoom,
+                export_plan=export_plan
             )
         except (ValueError, OSError) as e:
             raise QgsProcessingException(str(e))

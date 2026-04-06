@@ -55,8 +55,15 @@ produce vector tiles, glyphs, or sprite assets.
    - **Maximum zoom level**: The maximum zoom level to include (0-24)
    - **Tile image format**: PNG or JPG format for the generated tiles
    - **JPEG quality**: Compression quality for JPG tiles (1-100)
+   - **Include world tiles for low zoom levels**: Adds global base tiles to avoid blank map areas when zoomed out
+   - **World low-zoom coverage (3-5)**: When enabled, world tiles are generated from zoom 0 up to this zoom
    - **Output SMP file**: The location to save the SMP file
 6. Click "Run" to generate the SMP file
+
+When **Include world tiles for low zoom levels** is enabled, zoom levels `0..2`
+are always exported as full-world tiles, and world coverage can be extended up
+to zoom `3..5` with **World low-zoom coverage (3-5)**. Higher zoom levels
+continue to use the selected extent.
 
 The plugin renders visible project layers in QGIS layer-tree order, and uses
 custom layer order when that project setting is enabled.

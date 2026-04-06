@@ -9,7 +9,7 @@ import shutil
 import zipfile
 import tempfile
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from qgis.core import (
     QgsProject,
     QgsMapSettings,
@@ -30,6 +30,7 @@ BYTES_PER_TILE_PNG = 50 * 1024
 BYTES_PER_TILE_JPG = 15 * 1024
 # Minimum free disk space to keep (100 MB)
 MIN_FREE_SPACE_BYTES = 100 * 1024 * 1024
+WORLD_BOUNDS_WGS84 = (-180.0, -85.0511, 180.0, 85.0511)
 
 
 class TileCache:
@@ -152,6 +153,13 @@ class SMPGenerator:
     TILE_FORMAT_PNG = 'PNG'
     TILE_FORMAT_JPG = 'JPG'
 
+    # QGIS rendering (QgsMapRendererCustomPainterJob) is not safe to call
+    # concurrently from multiple threads.  This lock serialises all
+    # map-rendering calls so that only one job is active at a time, while
+    # still allowing the ThreadPoolExecutor to parallelise the cheap parts
+    # (cache checks, file I/O, progress bookkeeping).
+    _render_lock = threading.Lock()
+
     def __init__(self, feedback=None):
         """
         Initialize the SMP generator
@@ -203,7 +211,131 @@ class SMPGenerator:
         lat_deg = math.degrees(lat_rad)
         return lat_deg, lon_deg
 
-    def estimate_tile_count(self, extent, min_zoom, max_zoom):
+    def get_world_extent(self):
+        """Return Web Mercator world bounds transformed to project CRS."""
+        wgs84_rect = QgsRectangle(*WORLD_BOUNDS_WGS84)
+        wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
+        project_crs = QgsProject.instance().crs()
+        transform = QgsCoordinateTransform(wgs84, project_crs, QgsProject.instance())
+        return transform.transformBoundingBox(wgs84_rect)
+
+    def _get_extent_for_zoom(self, extent, world_extent, zoom,
+                             include_world_base_zooms=False, world_max_zoom=3):
+        """Return per-zoom extent according to world-base-zooms options."""
+        if include_world_base_zooms and zoom <= max(2, world_max_zoom):
+            return world_extent
+        return extent
+
+    def _get_export_zooms(self, min_zoom, max_zoom,
+                          include_world_base_zooms=False, world_max_zoom=3):
+        """Return sorted zoom levels to export."""
+        zooms = set(range(min_zoom, max_zoom + 1))
+        if include_world_base_zooms:
+            zooms.update(range(0, max(2, world_max_zoom) + 1))
+        return sorted(zooms)
+
+    def _iter_export_ranges(self, extent, min_zoom, max_zoom,
+                            include_world_base_zooms=False, world_max_zoom=3):
+        """Yield `(zoom, zoom_extent, ranges)` for the effective export plan."""
+        world_extent = self.get_world_extent() if include_world_base_zooms else None
+        export_zooms = self._get_export_zooms(
+            min_zoom, max_zoom,
+            include_world_base_zooms=include_world_base_zooms,
+            world_max_zoom=world_max_zoom
+        )
+        for zoom in export_zooms:
+            zoom_extent = self._get_extent_for_zoom(
+                extent,
+                world_extent,
+                zoom,
+                include_world_base_zooms=include_world_base_zooms,
+                world_max_zoom=world_max_zoom
+            )
+            yield zoom, zoom_extent, self._calculate_tiles_at_zoom(zoom_extent, zoom)
+
+    def _build_export_plan(self, extent, min_zoom, max_zoom,
+                           include_world_base_zooms=False, world_max_zoom=3):
+        """Return a normalized export plan shared by estimates, rendering, and packaging."""
+        tiles_by_zoom = []
+        total_tiles = 0
+        export_zooms = []
+
+        for zoom, _zoom_extent, ranges in self._iter_export_ranges(
+            extent,
+            min_zoom,
+            max_zoom,
+            include_world_base_zooms=include_world_base_zooms,
+            world_max_zoom=world_max_zoom
+        ):
+            export_zooms.append(zoom)
+            for min_x, max_x, min_y, max_y in ranges:
+                num_tiles = (max_x - min_x + 1) * (max_y - min_y + 1)
+                tiles_by_zoom.append((zoom, min_x, max_x, min_y, max_y, num_tiles))
+                total_tiles += num_tiles
+
+        world_tiles = sum(4 ** zoom for zoom in export_zooms)
+        return {
+            'export_zooms': export_zooms,
+            'tiles_by_zoom': tiles_by_zoom,
+            'total_tiles': total_tiles,
+            'world_tiles': world_tiles,
+            'world_pct': (total_tiles / world_tiles) * 100 if world_tiles else 0,
+            'source_bounds': (
+                list(WORLD_BOUNDS_WGS84)
+                if include_world_base_zooms
+                else self._get_bounds_wgs84(extent)
+            )
+        }
+
+    @staticmethod
+    def _tile_paths_from_plan(tiles_by_zoom, tile_format):
+        """Return manifest paths for the tiles that belong to a single export plan."""
+        tile_ext = 'jpg' if tile_format == SMPGenerator.TILE_FORMAT_JPG else 'png'
+        tile_paths = set()
+        for zoom, min_x, max_x, min_y, max_y, _ in tiles_by_zoom:
+            for x in range(min_x, max_x + 1):
+                for y in range(min_y, max_y + 1):
+                    tile_paths.add(f"{zoom}/{x}/{y}.{tile_ext}")
+        return tile_paths
+
+    def estimate_world_tile_count(self, min_zoom, max_zoom):
+        """Estimate full-world tile count for a zoom range."""
+        return sum(4 ** zoom for zoom in range(min_zoom, max_zoom + 1))
+
+    def estimate_tile_storage_bytes(self, tile_count, tile_format=None):
+        """Estimate storage usage in bytes for a tile count and output format."""
+        if tile_format == self.TILE_FORMAT_JPG:
+            bytes_per_tile = BYTES_PER_TILE_JPG
+        else:
+            bytes_per_tile = BYTES_PER_TILE_PNG
+        return tile_count * bytes_per_tile
+
+    def estimate_mixed_tile_count(self, extent, min_zoom, max_zoom,
+                                  include_world_base_zooms=False, world_max_zoom=3):
+        """Estimate total tiles using world extent at low zooms when enabled."""
+        return self._build_export_plan(
+            extent,
+            min_zoom,
+            max_zoom,
+            include_world_base_zooms=include_world_base_zooms,
+            world_max_zoom=world_max_zoom
+        )['total_tiles']
+
+    def estimate_world_pyramid_percentage(self, extent, min_zoom, max_zoom,
+                                          include_world_base_zooms=False,
+                                          world_max_zoom=3):
+        """Return percentage of full-world pyramid represented by export tiles."""
+        plan = self._build_export_plan(
+            extent,
+            min_zoom,
+            max_zoom,
+            include_world_base_zooms=include_world_base_zooms,
+            world_max_zoom=world_max_zoom
+        )
+        return plan['total_tiles'], plan['world_tiles'], plan['world_pct']
+
+    def estimate_tile_count(self, extent, min_zoom, max_zoom,
+                            include_world_base_zooms=False, world_max_zoom=3):
         """
         Estimate the total number of tiles that will be generated.
 
@@ -212,14 +344,16 @@ class SMPGenerator:
         :param max_zoom: Maximum zoom level
         :return: Total estimated tile count
         """
-        total = 0
-        for zoom in range(min_zoom, max_zoom + 1):
-            ranges = self._calculate_tiles_at_zoom(extent, zoom)
-            for min_x, max_x, min_y, max_y in ranges:
-                total += (max_x - min_x + 1) * (max_y - min_y + 1)
-        return total
+        return self.estimate_mixed_tile_count(
+            extent,
+            min_zoom,
+            max_zoom,
+            include_world_base_zooms=include_world_base_zooms,
+            world_max_zoom=world_max_zoom
+        )
 
-    def validate_tile_count(self, extent, min_zoom, max_zoom):
+    def validate_tile_count(self, extent, min_zoom, max_zoom,
+                            include_world_base_zooms=False, world_max_zoom=3):
         """
         Check estimated tile count and return (count, warning_message).
 
@@ -228,7 +362,13 @@ class SMPGenerator:
         :param max_zoom: Maximum zoom level
         :return: Tuple of (tile_count, warning_message_or_None)
         """
-        count = self.estimate_tile_count(extent, min_zoom, max_zoom)
+        count = self.estimate_tile_count(
+            extent,
+            min_zoom,
+            max_zoom,
+            include_world_base_zooms=include_world_base_zooms,
+            world_max_zoom=world_max_zoom
+        )
         warning = None
 
         if count > TILE_COUNT_WARNING_THRESHOLD:
@@ -248,12 +388,7 @@ class SMPGenerator:
         :param tile_format: Tile format ('PNG' or 'JPG')
         :raises OSError: If insufficient disk space
         """
-        if tile_format == self.TILE_FORMAT_JPG:
-            bytes_per_tile = BYTES_PER_TILE_JPG
-        else:
-            bytes_per_tile = BYTES_PER_TILE_PNG
-
-        estimated_bytes = tile_count * bytes_per_tile
+        estimated_bytes = self.estimate_tile_storage_bytes(tile_count, tile_format)
         estimated_mb = estimated_bytes / (1024 * 1024)
 
         output_dir = os.path.dirname(os.path.abspath(output_path)) or '.'
@@ -299,7 +434,8 @@ class SMPGenerator:
 
         return None
 
-    def get_tile_grid_rects(self, extent, min_zoom, max_zoom):
+    def get_tile_grid_rects(self, extent, min_zoom, max_zoom,
+                            include_world_base_zooms=False, world_max_zoom=3):
         """
         Return the WGS84 bounding rectangles of all tiles that would be generated.
 
@@ -314,8 +450,13 @@ class SMPGenerator:
                    "west": w, "south": s, "east": e, "north": n}, ...]
         """
         rects = []
-        for zoom in range(min_zoom, max_zoom + 1):
-            ranges = self._calculate_tiles_at_zoom(extent, zoom)
+        for zoom, _zoom_extent, ranges in self._iter_export_ranges(
+            extent,
+            min_zoom,
+            max_zoom,
+            include_world_base_zooms=include_world_base_zooms,
+            world_max_zoom=world_max_zoom
+        ):
             for min_x, max_x, min_y, max_y in ranges:
                 for x in range(min_x, max_x + 1):
                     for y in range(min_y, max_y + 1):
@@ -334,7 +475,10 @@ class SMPGenerator:
 
     def generate_smp_from_canvas(self, extent, min_zoom, max_zoom, output_path,
                                  tile_format=None, jpeg_quality=85, cache_dir=None,
-                                 max_workers=None):
+                                 max_workers=None,
+                                 include_world_base_zooms=False,
+                                 world_max_zoom=3,
+                                 export_plan=None):
         """
         Generate an SMP file from the current map canvas
 
@@ -364,8 +508,28 @@ class SMPGenerator:
                  (f", JPEG quality: {jpeg_quality}" if tile_format == self.TILE_FORMAT_JPG else ""))
 
         # --- Pre-generation validations ---
-        tile_count, count_warning = self.validate_tile_count(extent, min_zoom, max_zoom)
+        if export_plan is None:
+            export_plan = self._build_export_plan(
+                extent,
+                min_zoom,
+                max_zoom,
+                include_world_base_zooms=include_world_base_zooms,
+                world_max_zoom=world_max_zoom
+            )
+        tile_count = export_plan['total_tiles']
+        count_warning = None
+        if tile_count > TILE_COUNT_WARNING_THRESHOLD:
+            count_warning = (
+                f"Warning: estimated tile count is {tile_count:,}. "
+                f"Generation may take a long time. Consider reducing the extent or zoom range."
+            )
+        estimated_bytes = self.estimate_tile_storage_bytes(tile_count, tile_format)
+        estimated_mb = estimated_bytes / (1024 * 1024)
+        self.log(f"Include world base zooms: {include_world_base_zooms}")
+        self.log(f"World max zoom: {world_max_zoom}")
         self.log(f"Estimated tile count: {tile_count:,}")
+        self.log(f"Estimated output size: {estimated_mb:.1f} MB")
+        self.log(f"Estimated world pyramid coverage: {export_plan['world_pct']:.2f}%")
         if count_warning:
             self.log(count_warning, Qgis.Warning)
 
@@ -385,7 +549,12 @@ class SMPGenerator:
             os.makedirs(style_dir, exist_ok=True)
 
             # Generate the style.json file in the root directory
-            style = self._create_style_from_canvas(extent, min_zoom, max_zoom, tile_format)
+            style = self._create_style_from_canvas(
+                extent, min_zoom, max_zoom, tile_format,
+                include_world_base_zooms=include_world_base_zooms,
+                world_max_zoom=world_max_zoom,
+                source_bounds=export_plan['source_bounds']
+            )
             style_path = os.path.join(temp_dir, "style.json")
             with open(style_path, 'w') as f:
                 json.dump(style, f, indent=4)
@@ -403,7 +572,10 @@ class SMPGenerator:
                 tile_format=tile_format, jpeg_quality=jpeg_quality,
                 resume=(cache_dir is not None),
                 max_workers=max_workers,
-                tile_cache=tile_cache
+                tile_cache=tile_cache,
+                include_world_base_zooms=include_world_base_zooms,
+                world_max_zoom=world_max_zoom,
+                export_plan=export_plan
             )
             if tile_cache is not None:
                 tile_cache.flush()
@@ -419,16 +591,7 @@ class SMPGenerator:
             # Only needed when cache_dir is used (otherwise tiles_dir is fresh).
             tile_paths = None
             if cache_dir is not None:
-                tile_ext = 'jpg' if tile_format == self.TILE_FORMAT_JPG else 'png'
-                tile_paths = set()
-                for zoom in range(min_zoom, max_zoom + 1):
-                    ranges = self._calculate_tiles_at_zoom(extent, zoom)
-                    for min_x, max_x, min_y, max_y in ranges:
-                        for x in range(min_x, max_x + 1):
-                            for y in range(min_y, max_y + 1):
-                                tile_paths.add(
-                                    f"{zoom}/{x}/{y}.{tile_ext}"
-                                )
+                tile_paths = self._tile_paths_from_plan(export_plan['tiles_by_zoom'], tile_format)
 
             # Create the SMP file (zip archive)
             archive_built = self._build_smp_archive(
@@ -453,7 +616,9 @@ class SMPGenerator:
                 shutil.rmtree(temp_dir)
                 self.log(f"Cleaned up temporary directory: {temp_dir}")
 
-    def _create_style_from_canvas(self, extent, min_zoom, max_zoom, tile_format=None):
+    def _create_style_from_canvas(self, extent, min_zoom, max_zoom, tile_format=None,
+                                 include_world_base_zooms=False, world_max_zoom=3,
+                                 source_bounds=None):
         """
         Create a MapLibre style JSON from the current map canvas
 
@@ -468,12 +633,21 @@ class SMPGenerator:
 
         tile_ext = 'jpg' if tile_format.upper() == self.TILE_FORMAT_JPG else 'png'
 
-        # Get the layer bounds in WGS84
-        bounds = self._get_bounds_wgs84(extent)
+        # World low-zoom exports need source bounds that match the actual tile pyramid.
+        if source_bounds is not None:
+            bounds = source_bounds
+        elif include_world_base_zooms:
+            bounds = list(WORLD_BOUNDS_WGS84)
+        else:
+            bounds = self._get_bounds_wgs84(extent)
 
         # Calculate center from bounds
         center_lon = (bounds[0] + bounds[2]) / 2
         center_lat = (bounds[1] + bounds[3]) / 2
+
+        effective_min_zoom = min_zoom
+        if include_world_base_zooms:
+            effective_min_zoom = min(effective_min_zoom, 0)
 
         # Keep the initial zoom within the available source range.
         default_zoom = min(
@@ -492,7 +666,7 @@ class SMPGenerator:
                     "name": "QGIS Map",
                     "version": "2.0",
                     "type": "raster",
-                    "minzoom": min_zoom,
+                    "minzoom": effective_min_zoom,
                     "maxzoom": max_zoom,
                     "scheme": "xyz",
                     "bounds": bounds,
@@ -706,41 +880,26 @@ class SMPGenerator:
             img.fill(0)
 
         painter = QPainter(img)
-        job = QgsMapRendererCustomPainterJob(ms, painter)
-        job.start()
-        try:
-            cancel_without_blocking = getattr(job, 'cancelWithoutBlocking', None)
-            cancel = getattr(job, 'cancel', None)
-            is_active = getattr(job, 'isActive', None)
+        cancelled = False
+        with self._render_lock:
+            # QgsMapRendererCustomPainterJob is not thread-safe; only one
+            # render job may be active at a time.  The lock also ensures
+            # that the Qt event loop can process the job's completion
+            # signal without contention from parallel workers.
+            job = QgsMapRendererCustomPainterJob(ms, painter)
+            job.start()
+            job.waitForFinished()
+            # Check cancellation *after* the job finishes so we can
+            # still abort early for subsequent tiles.
+            if ((cancel_event is not None and cancel_event.is_set()) or
+                    (self.feedback and self.feedback.isCanceled())):
+                if cancel_event is not None:
+                    cancel_event.set()
+                cancelled = True
+        painter.end()
 
-            while True:
-                if ((cancel_event is not None and cancel_event.is_set()) or
-                        (self.feedback and self.feedback.isCanceled())):
-                    if cancel_event is not None:
-                        cancel_event.set()
-                    if callable(cancel_without_blocking):
-                        cancel_without_blocking()
-                    elif callable(cancel):
-                        cancel()
-                    job.waitForFinished()
-                    return False
-
-                if callable(is_active):
-                    active = is_active()
-                    if isinstance(active, bool):
-                        if not active:
-                            break
-                        time.sleep(0.01)
-                        continue
-                    if not active:
-                        break
-                    job.waitForFinished()
-                    break
-
-                job.waitForFinished()
-                break
-        finally:
-            painter.end()
+        if cancelled:
+            return False
 
         if tile_format == self.TILE_FORMAT_JPG:
             saved = img.save(tile_path, qt_format, jpeg_quality)
@@ -761,7 +920,10 @@ class SMPGenerator:
 
     def _generate_tiles_from_canvas(self, extent, min_zoom, max_zoom, tiles_dir,
                                     tile_format=None, jpeg_quality=85, resume=False,
-                                    max_workers=None, tile_cache=None):
+                                    max_workers=None, tile_cache=None,
+                                    include_world_base_zooms=False,
+                                    world_max_zoom=3,
+                                    export_plan=None):
         """
         Generate tiles from the current map canvas
 
@@ -801,15 +963,16 @@ class SMPGenerator:
             self._project_cache_fingerprint(project, visible_layers)
         )
 
-        # Calculate total tiles across all zoom levels for progress tracking
-        total_tiles = 0
-        tiles_by_zoom = []
-        for zoom in range(min_zoom, max_zoom + 1):
-            ranges = self._calculate_tiles_at_zoom(extent, zoom)
-            for min_x, max_x, min_y, max_y in ranges:
-                num_tiles = (max_x - min_x + 1) * (max_y - min_y + 1)
-                tiles_by_zoom.append((zoom, min_x, max_x, min_y, max_y, num_tiles))
-                total_tiles += num_tiles
+        if export_plan is None:
+            export_plan = self._build_export_plan(
+                extent,
+                min_zoom,
+                max_zoom,
+                include_world_base_zooms=include_world_base_zooms,
+                world_max_zoom=world_max_zoom
+            )
+        total_tiles = export_plan['total_tiles']
+        tiles_by_zoom = export_plan['tiles_by_zoom']
 
         self.log(f"Total tiles to generate: {total_tiles}")
 
@@ -823,54 +986,97 @@ class SMPGenerator:
                 f"({max_x - min_x + 1}x{max_y - min_y + 1})"
             )
 
-        tile_tasks = [
-            (zoom, x, y)
-            for zoom, min_x, max_x, min_y, max_y, _ in tiles_by_zoom
-            for x in range(min_x, max_x + 1)
-            for y in range(min_y, max_y + 1)
-        ]
-
         tiles_completed = 0
         last_reported_pct = -1
         progress_lock = threading.Lock()
         cancel_event = threading.Event()
         effective_workers = max_workers if max_workers is not None else os.cpu_count() or 1
+        max_pending_futures = max(1, effective_workers * 2)
+        wait_timeout_seconds = 0.25
+        heartbeat_interval_seconds = 5.0
+        last_wait_log = time.monotonic()
 
         if self.feedback and total_tiles > 0:
             self.feedback.setProgress(0)
 
-        with ThreadPoolExecutor(max_workers=effective_workers) as executor:
-            # Submit futures lazily so we can stop before queueing all tiles
-            # when cancellation is requested.
-            futures = {}
-            for zoom, x, y in tile_tasks:
-                if self.feedback and self.feedback.isCanceled():
-                    cancel_event.set()
-                    break
-                f = executor.submit(
-                    self._render_single_tile,
-                    map_settings, zoom, x, y, tiles_dir,
-                    tile_format, jpeg_quality, resume,
-                    tile_cache, fingerprint, cancel_event
-                )
-                futures[f] = (zoom, x, y)
+        def iter_tile_tasks():
+            for zoom, min_x, max_x, min_y, max_y, _ in tiles_by_zoom:
+                for x in range(min_x, max_x + 1):
+                    for y in range(min_y, max_y + 1):
+                        yield (zoom, x, y)
 
-            for future in as_completed(futures):
-                future.result()
-                with progress_lock:
-                    tiles_completed += 1
+        with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+            futures = {}
+            tile_tasks = iter_tile_tasks()
+
+            def submit_pending():
+                while len(futures) < max_pending_futures:
                     if self.feedback and self.feedback.isCanceled():
-                        # Signal all running workers to abort and cancel any
-                        # futures that have not started yet.
                         cancel_event.set()
-                        for f in futures:
-                            f.cancel()
+                        return
+
+                    try:
+                        zoom, x, y = next(tile_tasks)
+                    except StopIteration:
+                        return
+
+                    future = executor.submit(
+                        self._render_single_tile,
+                        map_settings, zoom, x, y, tiles_dir,
+                        tile_format, jpeg_quality, resume,
+                        tile_cache, fingerprint, cancel_event
+                    )
+                    futures[future] = (zoom, x, y)
+
+            submit_pending()
+
+            while futures:
+                done, _pending = wait(
+                    list(futures.keys()),
+                    timeout=wait_timeout_seconds,
+                    return_when=FIRST_COMPLETED
+                )
+
+                if not done:
+                    if self.feedback and self.feedback.isCanceled():
+                        cancel_event.set()
+                        for pending_future in futures:
+                            pending_future.cancel()
                         break
-                    if self.feedback and total_tiles > 0:
-                        new_pct = int((tiles_completed / total_tiles) * 100)
-                        if new_pct != last_reported_pct:
-                            self.feedback.setProgress(new_pct)
-                            last_reported_pct = new_pct
+
+                    now = time.monotonic()
+                    if now - last_wait_log >= heartbeat_interval_seconds:
+                        sample = list(futures.values())[:3]
+                        self.log(
+                            f"Waiting on {len(futures)} in-flight tiles; "
+                            f"completed {tiles_completed}/{total_tiles}. "
+                            f"Sample in-flight tiles: {sample}"
+                        )
+                        last_wait_log = now
+                    continue
+
+                for future in done:
+                    futures.pop(future, None)
+                    future.result()
+                    with progress_lock:
+                        tiles_completed += 1
+                        if self.feedback and self.feedback.isCanceled():
+                            # Signal all running workers to abort and cancel any
+                            # futures that have not started yet.
+                            cancel_event.set()
+                            for pending_future in futures:
+                                pending_future.cancel()
+                            break
+                        if self.feedback and total_tiles > 0:
+                            new_pct = int((tiles_completed / total_tiles) * 100)
+                            if new_pct != last_reported_pct:
+                                self.feedback.setProgress(new_pct)
+                                last_reported_pct = new_pct
+
+                if cancel_event.is_set():
+                    break
+
+                submit_pending()
 
         if self.feedback and not self.feedback.isCanceled() and total_tiles > 0:
             self.feedback.setProgress(100)
