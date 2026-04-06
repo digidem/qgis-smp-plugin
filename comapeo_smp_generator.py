@@ -670,7 +670,6 @@ class SMPGenerator:
                     "maxzoom": max_zoom,
                     "scheme": "xyz",
                     "bounds": bounds,
-                    "center": [0, 0, 6],
                     "tiles": [
                         f"smp://maps.v1/s/0/{{z}}/{{x}}/{{y}}.{tile_ext}"
                     ]
@@ -697,7 +696,7 @@ class SMPGenerator:
                 "smp:bounds": bounds,
                 "smp:maxzoom": max_zoom,
                 "smp:sourceFolders": {
-                    source_id: "0"
+                    source_id: "s/0"
                 }
             },
             "center": [center_lon, center_lat],
@@ -1099,11 +1098,13 @@ class SMPGenerator:
         """
         self.log(f"Creating SMP archive: {output_path}")
         cancelled = False
-        with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        with zipfile.ZipFile(output_path, 'w') as zipf:
             if self.feedback and self.feedback.isCanceled():
                 cancelled = True
             else:
-                zipf.write(style_path, 'style.json')
+                zipf.write(style_path, 'style.json',
+                           compress_type=zipfile.ZIP_DEFLATED)
+                zipf.writestr('VERSION', '1.0')
             if not cancelled:
                 for root, _, files in os.walk(tiles_dir):
                     for file in files:
@@ -1118,7 +1119,10 @@ class SMPGenerator:
                         # When a tile manifest is provided, skip stale tiles
                         if tile_paths is not None and rel not in tile_paths:
                             continue
-                        zipf.write(fp, 's/0/' + rel)
+                        # Raster tiles (PNG/JPG) are already compressed;
+                        # use ZIP_STORED to avoid double-compression overhead.
+                        zipf.write(fp, 's/0/' + rel,
+                                   compress_type=zipfile.ZIP_STORED)
                     if cancelled:
                         break
 

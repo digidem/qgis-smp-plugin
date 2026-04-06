@@ -2189,5 +2189,143 @@ class TestErrorHandling(unittest.TestCase):
             self.assertFalse(os.path.exists(d),
                              f"Temp dir {d} was not cleaned up after error")
 
+class TestVersionFileInArchive(unittest.TestCase):
+    """SMP archive must contain a VERSION file with content '1.0'."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _build_minimal_smp(self):
+        gen = SMPGenerator()
+        style_path = os.path.join(self.tmp, 'style.json')
+        import json
+        with open(style_path, 'w') as f:
+            json.dump({"version": 8, "sources": {}, "layers": []}, f)
+
+        tiles_dir = os.path.join(self.tmp, 'tiles')
+        tile_file_dir = os.path.join(tiles_dir, '0', '0')
+        os.makedirs(tile_file_dir, exist_ok=True)
+        with open(os.path.join(tile_file_dir, '0.png'), 'wb') as f:
+            f.write(b'\x89PNG\r\n\x1a\n')
+
+        out_path = os.path.join(self.tmp, 'output.smp')
+        gen._build_smp_archive(style_path=style_path,
+                               tiles_dir=tiles_dir,
+                               output_path=out_path)
+        return out_path
+
+    def test_version_file_exists_in_archive(self):
+        import zipfile
+        smp = self._build_minimal_smp()
+        with zipfile.ZipFile(smp) as zf:
+            self.assertIn('VERSION', zf.namelist())
+
+    def test_version_file_content(self):
+        import zipfile
+        smp = self._build_minimal_smp()
+        with zipfile.ZipFile(smp) as zf:
+            content = zf.read('VERSION').decode('utf-8')
+        self.assertEqual(content, '1.0')
+
+
+class TestSourceFoldersValue(unittest.TestCase):
+    """smp:sourceFolders value must be 's/0', not '0'."""
+
+    def setUp(self):
+        self.gen = SMPGenerator()
+        self.gen._get_bounds_wgs84 = MagicMock(return_value=[-10, -10, 10, 10])
+
+    def _make_extent(self):
+        return _FakeRectangle(-10, -10, 10, 10)
+
+    def test_source_folders_value_is_s_slash_0(self):
+        style = self.gen._create_style_from_canvas(self._make_extent(), 0, 10)
+        source_id = list(style['sources'].keys())[0]
+        self.assertEqual(style['metadata']['smp:sourceFolders'][source_id], 's/0')
+
+    def test_source_folders_value_not_bare_0(self):
+        style = self.gen._create_style_from_canvas(self._make_extent(), 0, 10)
+        source_id = list(style['sources'].keys())[0]
+        self.assertNotEqual(style['metadata']['smp:sourceFolders'][source_id], '0')
+
+
+class TestSourceNoCenter(unittest.TestCase):
+    """Source definition must not contain a 'center' key."""
+
+    def setUp(self):
+        self.gen = SMPGenerator()
+        self.gen._get_bounds_wgs84 = MagicMock(return_value=[-10, -10, 10, 10])
+
+    def _make_extent(self):
+        return _FakeRectangle(-10, -10, 10, 10)
+
+    def test_source_has_no_center_key(self):
+        style = self.gen._create_style_from_canvas(self._make_extent(), 0, 10)
+        source = list(style['sources'].values())[0]
+        self.assertNotIn('center', source)
+
+    def test_root_center_still_exists(self):
+        """Root-level center should still be present (only source center was removed)."""
+        style = self.gen._create_style_from_canvas(self._make_extent(), 0, 10)
+        self.assertIn('center', style)
+        self.assertEqual(len(style['center']), 2)
+
+
+class TestZipCompressionMethods(unittest.TestCase):
+    """Tile entries use ZIP_STORED; style.json uses ZIP_DEFLATED."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _build_minimal_smp(self):
+        gen = SMPGenerator()
+        style_path = os.path.join(self.tmp, 'style.json')
+        import json
+        with open(style_path, 'w') as f:
+            json.dump({"version": 8, "sources": {}, "layers": []}, f)
+
+        tiles_dir = os.path.join(self.tmp, 'tiles')
+        tile_file_dir = os.path.join(tiles_dir, '0', '0')
+        os.makedirs(tile_file_dir, exist_ok=True)
+        with open(os.path.join(tile_file_dir, '0.png'), 'wb') as f:
+            f.write(b'\x89PNG\r\n\x1a\n')
+
+        out_path = os.path.join(self.tmp, 'output.smp')
+        gen._build_smp_archive(style_path=style_path,
+                               tiles_dir=tiles_dir,
+                               output_path=out_path)
+        return out_path
+
+    def test_tile_entries_use_zip_stored(self):
+        import zipfile
+        smp = self._build_minimal_smp()
+        with zipfile.ZipFile(smp) as zf:
+            tile_entries = [i for i in zf.infolist()
+                           if i.filename.startswith('s/0/')]
+        self.assertGreater(len(tile_entries), 0)
+        for entry in tile_entries:
+            self.assertEqual(
+                entry.compress_type, zipfile.ZIP_STORED,
+                f"Tile {entry.filename!r} should use ZIP_STORED, "
+                f"got {entry.compress_type}"
+            )
+
+    def test_style_json_uses_zip_deflated(self):
+        import zipfile
+        smp = self._build_minimal_smp()
+        with zipfile.ZipFile(smp) as zf:
+            style_info = zf.getinfo('style.json')
+        self.assertEqual(
+            style_info.compress_type, zipfile.ZIP_DEFLATED,
+            f"style.json should use ZIP_DEFLATED, got {style_info.compress_type}"
+        )
+
+
 if __name__ == '__main__':
     unittest.main()
