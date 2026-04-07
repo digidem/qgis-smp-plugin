@@ -5,10 +5,13 @@ import json
 import math
 import threading
 import hashlib
+import struct
+import zlib
 import shutil
 import zipfile
 import tempfile
 import time
+from typing import NamedTuple
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from qgis.core import (
     QgsProject,
@@ -31,6 +34,21 @@ BYTES_PER_TILE_JPG = 15 * 1024
 # Minimum free disk space to keep (100 MB)
 MIN_FREE_SPACE_BYTES = 100 * 1024 * 1024
 WORLD_BOUNDS_WGS84 = (-180.0, -85.0511, 180.0, 85.0511)
+
+
+class LocalHeaderEntry(NamedTuple):
+    offset: int
+    arcname: str
+    crc: int
+    compressed_size: int
+    uncompressed_size: int
+
+
+class HashOffsetEntry(NamedTuple):
+    offset: int
+    crc: int
+    compressed_size: int
+    uncompressed_size: int
 
 
 class TileCache:
@@ -1153,10 +1171,9 @@ class SMPGenerator:
             return False
 
         if dedup and tile_entries:
-            self._build_smp_archive_dedup(
+            return self._build_smp_archive_dedup(
                 style_path, tile_entries, output_path
             )
-            return True
 
         with zipfile.ZipFile(output_path, 'w') as zipf:
             if self.feedback and self.feedback.isCanceled():
@@ -1192,22 +1209,29 @@ class SMPGenerator:
         :param style_path: Path to style.json
         :param tile_entries: List of (abs_path, archive_name) tuples
         :param output_path: Output path for SMP archive
+        :return: True on success, False on cancellation.
         """
-        import struct
+        cancelled = False
 
-        # Phase 1: Hash all tiles and group by content
-        hash_to_data = {}  # sha256 -> (bytes, first_arcname)
+        # Phase 1: Hash all tiles and group by content (streaming — bytes discarded after hash)
+        hash_to_meta = {}    # sha256 -> (filepath, first_arcname)
         hash_by_arcname = {}  # arcname -> sha256
-        unique_order = []  # ordered list of unique hashes
+        unique_order = []    # ordered list of unique hashes
 
         for fp, arcname in tile_entries:
             with open(fp, 'rb') as fh:
                 data = fh.read()
             content_hash = hashlib.sha256(data).hexdigest()
             hash_by_arcname[arcname] = content_hash
-            if content_hash not in hash_to_data:
-                hash_to_data[content_hash] = (data, arcname)
+            if content_hash not in hash_to_meta:
+                hash_to_meta[content_hash] = (fp, arcname)
                 unique_order.append(content_hash)
+            if self.feedback and self.feedback.isCanceled():
+                cancelled = True
+                break
+
+        if cancelled:
+            return False  # output file was never created
 
         num_duplicates = len(tile_entries) - len(unique_order)
         self.log(
@@ -1215,155 +1239,212 @@ class SMPGenerator:
             f"{num_duplicates} duplicates"
         )
 
-        # Phase 2: Build the ZIP file manually for offset control
-        # We write local file headers + data for unique tiles, then
-        # create a central directory with entries for ALL tiles (including
-        # duplicates pointing to the same offset as their unique original).
-        with open(output_path, 'wb') as f:
-            local_headers = []  # (offset, arcname, crc32, compressed_size, uncompressed_size)
+        # Phase 2: Build the ZIP file manually for offset control.
+        # We write local file headers + data for unique tiles only, then
+        # create a central directory with entries for ALL tiles. Duplicate
+        # tile CD entries point to the same local header offset but with the
+        # duplicate's own arcname. Note: the local header filename will be
+        # first_arcname — this is accepted by most ZIP readers for dedup
+        # archives (including Android's built-in ZIP handling).
+        try:
+            with open(output_path, 'wb') as f:
+                local_headers = []  # LocalHeaderEntry instances
 
-            # Write style.json
-            with open(style_path, 'rb') as sf:
-                style_data = sf.read()
-            style_crc = zipfile.crc32(style_data) & 0xFFFFFFFF
-            style_compressed = zipfile.ZipFile.writestr  # We'll use deflated
-            # Use zlib for compression (raw deflate without zlib headers)
-            import zlib
-            compressor = zlib.compressobj(6, zlib.DEFLATED, -15)
-            style_compressed = compressor.compress(style_data) + compressor.flush()
-            offset = f.tell()
-            # Local file header for style.json
-            local_header = struct.pack(
-                '<IHHHHHIIIHH',
-                0x04034b50,  # Local file header signature
-                20,  # Version needed
-                0,  # General purpose bit flag
-                8,  # Compression method: deflate
-                0,  # Last mod time
-                0,  # Last mod date
-                style_crc,
-                len(style_compressed),
-                len(style_data),
-                len('style.json'),
-                0  # Extra field length
-            )
-            f.write(local_header)
-            f.write(b'style.json')
-            f.write(style_compressed)
-            local_headers.append((offset, 'style.json', style_crc, len(style_compressed), len(style_data)))
+                # Write style.json
+                with open(style_path, 'rb') as sf:
+                    style_data = sf.read()
+                style_crc = zipfile.crc32(style_data) & 0xFFFFFFFF
+                compressor = zlib.compressobj(6, zlib.DEFLATED, -15)
+                style_compressed = compressor.compress(style_data) + compressor.flush()
+                offset = f.tell()
+                local_header = struct.pack(
+                    '<IHHHHHIIIHH',
+                    0x04034b50, 20, 0,
+                    8,  # Compression method: deflate
+                    0, 0,
+                    style_crc,
+                    len(style_compressed),
+                    len(style_data),
+                    len('style.json'),
+                    0
+                )
+                f.write(local_header)
+                f.write(b'style.json')
+                f.write(style_compressed)
+                local_headers.append(LocalHeaderEntry(
+                    offset, 'style.json', style_crc,
+                    len(style_compressed), len(style_data)
+                ))
 
-            # Write VERSION
-            version_data = b'1.0'
-            version_crc = zipfile.crc32(version_data) & 0xFFFFFFFF
-            offset = f.tell()
-            local_header = struct.pack(
-                '<IHHHHHIIIHH',
-                0x04034b50, 20, 0,
-                0,  # ZIP_STORED
-                0, 0,
-                version_crc,
-                len(version_data),
-                len(version_data),
-                len('VERSION'),
-                0
-            )
-            f.write(local_header)
-            f.write(b'VERSION')
-            f.write(version_data)
-            local_headers.append((offset, 'VERSION', version_crc, len(version_data), len(version_data)))
-
-            # Write unique tiles and record offsets
-            hash_to_offset = {}  # sha256 -> (offset, crc, size)
-            for content_hash in unique_order:
-                data, first_arcname = hash_to_data[content_hash]
-                arcname_bytes = first_arcname.encode('utf-8')
-                crc = zipfile.crc32(data) & 0xFFFFFFFF
+                # Write VERSION
+                version_data = b'1.0'
+                version_crc = zipfile.crc32(version_data) & 0xFFFFFFFF
                 offset = f.tell()
                 local_header = struct.pack(
                     '<IHHHHHIIIHH',
                     0x04034b50, 20, 0,
                     0,  # ZIP_STORED
                     0, 0,
-                    crc,
-                    len(data),
-                    len(data),
-                    len(arcname_bytes),
+                    version_crc,
+                    len(version_data),
+                    len(version_data),
+                    len('VERSION'),
                     0
                 )
                 f.write(local_header)
-                f.write(arcname_bytes)
-                f.write(data)
-                hash_to_offset[content_hash] = (offset, crc, len(data), len(data), len(arcname_bytes))
-                local_headers.append((offset, first_arcname, crc, len(data), len(data)))
+                f.write(b'VERSION')
+                f.write(version_data)
+                local_headers.append(LocalHeaderEntry(
+                    offset, 'VERSION', version_crc,
+                    len(version_data), len(version_data)
+                ))
 
-            # Build central directory with ALL entries (including duplicates)
-            central_dir_entries = []
+                # Write unique tiles and record offsets
+                hash_to_offset = {}  # sha256 -> HashOffsetEntry
+                for content_hash in unique_order:
+                    if self.feedback and self.feedback.isCanceled():
+                        cancelled = True
+                        break
+                    filepath, first_arcname = hash_to_meta[content_hash]
+                    arcname_bytes = first_arcname.encode('utf-8')
+                    with open(filepath, 'rb') as fh:
+                        data = fh.read()
+                    crc = zipfile.crc32(data) & 0xFFFFFFFF
+                    offset = f.tell()
+                    local_header = struct.pack(
+                        '<IHHHHHIIIHH',
+                        0x04034b50, 20, 0,
+                        0,  # ZIP_STORED
+                        0, 0,
+                        crc,
+                        len(data),
+                        len(data),
+                        len(arcname_bytes),
+                        0
+                    )
+                    f.write(local_header)
+                    f.write(arcname_bytes)
+                    f.write(data)
+                    hash_to_offset[content_hash] = HashOffsetEntry(
+                        offset, crc, len(data), len(data)
+                    )
 
-            # style.json entry
-            cd_entry = self._make_central_dir_entry(
-                'style.json', local_headers[0], 8  # deflate
-            )
-            central_dir_entries.append(cd_entry)
+                if not cancelled:
+                    # Build central directory entries for ALL tiles (including duplicates)
+                    central_dir_entries = []
 
-            # VERSION entry
-            cd_entry = self._make_central_dir_entry(
-                'VERSION', local_headers[1], 0  # stored
-            )
-            central_dir_entries.append(cd_entry)
+                    cd_entry = self._make_central_dir_entry(
+                        'style.json', local_headers[0], 8  # deflate
+                    )
+                    central_dir_entries.append(cd_entry)
 
-            # Tile entries (unique + duplicates)
-            for fp, arcname in tile_entries:
-                content_hash = hash_by_arcname[arcname]
-                offset_info = hash_to_offset[content_hash]
-                cd_entry = self._make_central_dir_entry(arcname, offset_info, 0)
-                central_dir_entries.append(cd_entry)
+                    cd_entry = self._make_central_dir_entry(
+                        'VERSION', local_headers[1], 0  # stored
+                    )
+                    central_dir_entries.append(cd_entry)
 
-            # Write central directory
-            cd_offset = f.tell()
-            for entry in central_dir_entries:
-                f.write(entry)
-            cd_size = f.tell() - cd_offset
+                    for fp, arcname in tile_entries:
+                        content_hash = hash_by_arcname[arcname]
+                        offset_info = hash_to_offset[content_hash]
+                        cd_entry = self._make_central_dir_entry(arcname, offset_info, 0)
+                        central_dir_entries.append(cd_entry)
 
-            # Write end of central directory record
-            eocd = struct.pack(
-                '<IHHHHIIH',
-                0x06054b50,  # EOCD signature
-                0,  # Disk number
-                0,  # Disk with CD
-                len(central_dir_entries),  # Entries on this disk
-                len(central_dir_entries),  # Total entries
-                cd_size,
-                cd_offset,
-                0  # Comment length
-            )
-            f.write(eocd)
+                    # Guard: standard ZIP format is limited to 65535 entries
+                    # (0xFFFF is also the ZIP64 magic marker for entry counts).
+                    # style.json + VERSION + tiles, so effective tile limit is 65533.
+                    if len(central_dir_entries) >= 65535:
+                        raise ValueError(
+                            f"Archive has {len(central_dir_entries)} entries, which "
+                            f"exceeds the ZIP format limit of 65534. "
+                            f"The effective tile limit is 65533 (65535 minus style.json "
+                            f"and VERSION). Reduce the zoom range or export extent."
+                        )
+
+                    # Write central directory
+                    cd_offset = f.tell()
+                    for entry in central_dir_entries:
+                        f.write(entry)
+                        if self.feedback and self.feedback.isCanceled():
+                            cancelled = True
+                            break
+
+                    if not cancelled:
+                        cd_size = f.tell() - cd_offset
+
+                        # Guard: 4GB ZIP32 size limit
+                        self._check_zip32_limit(f)
+
+                        # Write end of central directory record
+                        eocd = struct.pack(
+                            '<IHHHHIIH',
+                            0x06054b50,  # EOCD signature
+                            0,  # Disk number
+                            0,  # Disk with CD
+                            len(central_dir_entries),  # Entries on this disk
+                            len(central_dir_entries),  # Total entries
+                            cd_size,
+                            cd_offset,
+                            0  # Comment length
+                        )
+                        f.write(eocd)
+        except Exception:
+            try:
+                os.unlink(output_path)
+            except OSError:
+                pass
+            raise
+
+        if cancelled:
+            try:
+                os.unlink(output_path)
+            except OSError:
+                pass
+            return False
 
         return True
+
+    @staticmethod
+    def _check_zip32_limit(f):
+        """Raise ValueError if the current file position exceeds the 4 GiB ZIP limit.
+
+        Standard ZIP format uses 32-bit unsigned integers for file offsets and sizes.
+        If an archive exceeds 4 GiB, those fields silently truncate — producing a
+        silently corrupt archive. Call this before writing the EOCD record.
+
+        :param f: Open writable file object (must support tell()).
+        :raises ValueError: If f.tell() > 0xFFFFFFFF.
+        """
+        if f.tell() > 0xFFFFFFFF:
+            raise ValueError(
+                "Archive size exceeded the 4 GB limit for standard ZIP format. "
+                "Use ZIP64 or reduce the export extent and zoom range."
+            )
 
     @staticmethod
     def _make_central_dir_entry(arcname, offset_info, compress_method):
         """Create a central directory entry for a ZIP file.
 
         :param arcname: Archive entry name
-        :param offset_info: Tuple of (local_header_offset, crc32,
-            compressed_size, uncompressed_size, name_length) OR
-            (local_header_offset, arcname, crc32, compressed_size, uncompressed_size)
+        :param offset_info: A LocalHeaderEntry or HashOffsetEntry named tuple.
         :param compress_method: Compression method (0=stored, 8=deflate)
         :return: Bytes of the central directory entry
         """
-        import struct as _struct
         arcname_bytes = arcname.encode('utf-8')
 
-        if len(offset_info) == 5 and isinstance(offset_info[1], str):
-            # From local_headers format: (offset, name, crc, compressed, uncompressed)
-            local_offset, _, crc, compressed_size, uncompressed_size = offset_info
-        elif len(offset_info) == 5:
-            # From hash_to_offset format: (offset, crc, compressed, uncompressed, name_len)
-            local_offset, crc, compressed_size, uncompressed_size, _ = offset_info
+        if isinstance(offset_info, LocalHeaderEntry):
+            local_offset = offset_info.offset
+            crc = offset_info.crc
+            compressed_size = offset_info.compressed_size
+            uncompressed_size = offset_info.uncompressed_size
+        elif isinstance(offset_info, HashOffsetEntry):
+            local_offset = offset_info.offset
+            crc = offset_info.crc
+            compressed_size = offset_info.compressed_size
+            uncompressed_size = offset_info.uncompressed_size
         else:
-            raise ValueError(f"Unexpected offset_info format: {offset_info}")
+            raise ValueError(f"Unexpected offset_info type: {type(offset_info)}")
 
-        return _struct.pack(
+        return struct.pack(
             '<IHHHHHHIIIHHHHHII',
             0x02014b50,  # Central directory file header signature
             20,  # Version made by

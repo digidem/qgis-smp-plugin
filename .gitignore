@@ -39,6 +39,14 @@ venv.bak/
 *.swp
 *.swo
 
+# Agent / review artifacts
+plans/
+.junie/
+REVIEW_*.md
+diff.txt
+output.txt
+tmp_*.py
+
 # OS specific files
 .DS_Store
 Thumbs.db

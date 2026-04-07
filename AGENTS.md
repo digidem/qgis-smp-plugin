@@ -30,6 +30,13 @@ Operational instructions for coding agents working in this repository.
 - Fast text search: `rg "pattern" -n`
 - Reliable local logic tests (no QGIS runtime needed): `make test`,
   `make test-logic`, or `PYTHONPATH=. python3 test/test_generator.py`
+- Headless QGIS integration test (uses real QGIS bindings, no GUI):
+  `./scripts/test-qgis-headless.py` — verifies CRS transforms, style
+  generation, archive build, dedup, and cancellation in an actual QGIS
+  runtime. Uses system Python (`/usr/bin/python3`) which has PyQt5 and
+  QGIS bindings. Requires `QT_QPA_PLATFORM=offscreen`.
+- Install plugin into local QGIS for manual testing: `./install-dev.sh`
+  then reload in QGIS (Plugin Reloader or restart).
 - Full legacy QGIS test command (requires QGIS Python env + `nosetests`):
   `make test-legacy`
 - Lint command (non-blocking by Makefile design): `make pylint`
@@ -63,8 +70,19 @@ Operational instructions for coding agents working in this repository.
 ## When Stuck
 
 - If QGIS runtime is unavailable, run `PYTHONPATH=. python3 test/test_generator.py` and clearly note QGIS-dependent gaps.
+- For headless QGIS testing (real CRS transforms, style generation, archive build): `./scripts/test-qgis-headless.py` — uses system Python (`/usr/bin/python3`) with QGIS bindings, runs offscreen.
 - If `python3 -m unittest test...` fails outside a QGIS Python environment,
   remember that `test/__init__.py` imports `qgis` eagerly; that failure does
   not invalidate the QGIS-free logic tests.
 - If command behavior is unclear, inspect with `make -n` before executing.
 - If requirements conflict, follow explicit user instructions first and call out tradeoffs briefly.
+
+## Approach
+- Think before acting. Read existing files before writing code.
+- Be concise in output but thorough in reasoning.
+- Prefer editing over rewriting whole files.
+- Do not re-read files you have already read unless the file may have changed.
+- Test your code before declaring done.
+- No sycophantic openers or closing fluff.
+- Keep solutions simple and direct.
+- User instructions always override this file.

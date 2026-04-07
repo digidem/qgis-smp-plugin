@@ -6,7 +6,7 @@
 name=CoMapeo Map Builder
 qgisMinimumVersion=3.0
 description=Generates SMP files for CoMapeo using proper XYZ Web Mercator tiling
-version=0.5.0
+version=0.6.0
 author=Awana Digital
 email=luandro@awana.digital
 
@@ -20,10 +20,20 @@ repository=https://github.com/digidem/qgis-smp-plugin
 
 hasProcessingProvider=yes
 changelog=
+    0.6.0 - Dedup hardening & test coverage
+    * Fix dedup cancellation: Phase 1 and Phase 2 now return False and clean up partial files
+    * Add ZIP32 entry-count guard (archive fails fast if >65533 tiles)
+    * Add 4GB ZIP32 size guard before writing EOCD
+    * Dedup error handling now deletes partial output on any exception
+    * Use NamedTuples (LocalHeaderEntry, HashOffsetEntry) for clarity in ZIP building
+    * Fix metadata.txt changelog typo (stayed at 0%% -> stayed at 0%%)
+    * Add headless QGIS integration test script (scripts/test-qgis-headless.py)
+    * Add install-dev.sh --watch mode for live-reload during development
+    * Add 9 new dedup/cancellation/validation tests (137 -> 146 total)
     0.5.0 - World base zoom tiles & rendering hang fix
     * Add 'Include world tiles for low zoom levels' option for global base tile coverage
     * Add 'World low-zoom coverage (3-5)' parameter to control world tile depth
-    * Fix rendering deadlock that progress bar stuck at 0%%)
+    * Fix rendering deadlock that caused progress bar to stay at 0%%
       - Replace broken isActive() polling with waitForFinished()
       - Serialise QgsMapRendererCustomPainterJob via render lock
     0.4.0 - Large map support & usability
