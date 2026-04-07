@@ -89,7 +89,12 @@ class TileCache:
         if os.path.exists(path):
             try:
                 with open(path) as fh:
-                    return json.load(fh)
+                    data = json.load(fh)
+                # Schema migration: discard old-format caches that lack
+                # source_index in their keys.
+                if data.get('schema_version', 0) < 2:
+                    return {}
+                return data
             except (json.JSONDecodeError, OSError):
                 return {}
         return {}
@@ -102,7 +107,9 @@ class TileCache:
         tmp_path = self._meta_path + '.tmp'
         try:
             with open(tmp_path, 'w') as fh:
-                json.dump(self._state['meta'], fh)
+                meta = dict(self._state['meta'])
+                meta['schema_version'] = 2
+                json.dump(meta, fh)
             os.replace(tmp_path, self._meta_path)
         except Exception:
             try:
@@ -118,17 +125,17 @@ class TileCache:
         parts.extend(str(part) for part in extra_parts if part not in (None, ''))
         return ':'.join(parts)
 
-    def is_fresh(self, zoom, x, y, fingerprint):
+    def is_fresh(self, zoom, x, y, fingerprint, source_index=0):
         """Return True if the cached tile matches the current fingerprint."""
-        key = f"{zoom}/{x}/{y}"
+        key = f"{source_index}/{zoom}/{x}/{y}"
         return self._state['meta'].get(key) == fingerprint
 
-    def mark(self, zoom, x, y, fingerprint, defer_save=False):
+    def mark(self, zoom, x, y, fingerprint, defer_save=False, source_index=0):
         """Record that tile (zoom, x, y) was rendered with this fingerprint.
 
         Thread-safe: acquires the instance lock before mutating shared state.
         """
-        key = f"{zoom}/{x}/{y}"
+        key = f"{source_index}/{zoom}/{x}/{y}"
         with self._lock:
             self._state['meta'][key] = fingerprint
             if defer_save:
@@ -137,14 +144,14 @@ class TileCache:
                 self._save()
                 self._state['dirty'] = False
 
-    def invalidate(self, zoom, x, y, defer_save=False):
+    def invalidate(self, zoom, x, y, defer_save=False, source_index=0):
         """Remove a tile fingerprint so a future run will re-render it.
 
         This helper is not used internally today, but it is retained for
         cache-management callers and tests. Thread-safe: acquires the instance
         lock before mutating shared state.
         """
-        key = f"{zoom}/{x}/{y}"
+        key = f"{source_index}/{zoom}/{x}/{y}"
         with self._lock:
             self._state['meta'].pop(key, None)
             if defer_save:
@@ -292,25 +299,72 @@ class SMPGenerator:
             )
             yield zoom, zoom_extent, self._calculate_tiles_at_zoom(zoom_extent, zoom)
 
+    def _build_single_source_plan(self, extent, zoom_list, source_id, source_index):
+        """Build a per-source export plan with 7-element tiles_by_zoom tuples.
+
+        :param extent: QgsRectangle extent for this source
+        :param zoom_list: List of zoom levels to include
+        :param source_id: Source identifier string (e.g. "world-overview")
+        :param source_index: Integer source index (0 for world/single, 1 for region)
+        :return: Dict with source_id, source_index, source_bounds, export_zooms,
+                 tiles_by_zoom (7-tuples), total_tiles
+        """
+        tiles_by_zoom = []
+        total_tiles = 0
+
+        for zoom in zoom_list:
+            for min_x, max_x, min_y, max_y in self._calculate_tiles_at_zoom(extent, zoom):
+                num_tiles = (max_x - min_x + 1) * (max_y - min_y + 1)
+                tiles_by_zoom.append((zoom, min_x, max_x, min_y, max_y, num_tiles, source_index))
+                total_tiles += num_tiles
+
+        return {
+            'source_id': source_id,
+            'source_index': source_index,
+            'source_bounds': self._get_bounds_wgs84(extent),
+            'export_zooms': list(zoom_list),
+            'tiles_by_zoom': tiles_by_zoom,
+            'total_tiles': total_tiles,
+        }
+
     def _build_export_plan(self, extent, min_zoom, max_zoom,
                            include_world_base_zooms=False, world_max_zoom=3):
         """Return a normalized export plan shared by estimates, rendering, and packaging."""
-        tiles_by_zoom = []
-        total_tiles = 0
-        export_zooms = []
+        sources = []
 
-        for zoom, _zoom_extent, ranges in self._iter_export_ranges(
-            extent,
-            min_zoom,
-            max_zoom,
-            include_world_base_zooms=include_world_base_zooms,
-            world_max_zoom=world_max_zoom
-        ):
-            export_zooms.append(zoom)
-            for min_x, max_x, min_y, max_y in ranges:
-                num_tiles = (max_x - min_x + 1) * (max_y - min_y + 1)
-                tiles_by_zoom.append((zoom, min_x, max_x, min_y, max_y, num_tiles))
-                total_tiles += num_tiles
+        if include_world_base_zooms:
+            world_extent = self.get_world_extent()
+            world_zoom_max = max(2, world_max_zoom)
+            world_zoom_list = list(range(0, world_zoom_max + 1))
+            world_plan = self._build_single_source_plan(
+                world_extent, world_zoom_list,
+                source_id="world-overview", source_index=0
+            )
+            region_zoom_list = list(range(min_zoom, max_zoom + 1))
+            region_plan = self._build_single_source_plan(
+                extent, region_zoom_list,
+                source_id="region-detail", source_index=1
+            )
+            sources = [world_plan, region_plan]
+        else:
+            zoom_list = list(range(min_zoom, max_zoom + 1))
+            single_plan = self._build_single_source_plan(
+                extent, zoom_list,
+                source_id="mbtiles-source", source_index=0
+            )
+            sources = [single_plan]
+
+        # Merge per-source tiles_by_zoom into a single flat list
+        tiles_by_zoom = []
+        for src in sources:
+            tiles_by_zoom.extend(src['tiles_by_zoom'])
+
+        total_tiles = sum(s['total_tiles'] for s in sources)
+
+        # Compute export_zooms as the union of all source zooms
+        export_zooms = sorted(set(
+            z for src in sources for z in src['export_zooms']
+        ))
 
         world_tiles = sum(4 ** zoom for zoom in export_zooms)
         return {
@@ -323,18 +377,27 @@ class SMPGenerator:
                 list(WORLD_BOUNDS_WGS84)
                 if include_world_base_zooms
                 else self._get_bounds_wgs84(extent)
-            )
+            ),
+            'sources': sources,
         }
 
     @staticmethod
-    def _tile_paths_from_plan(tiles_by_zoom, tile_format):
-        """Return manifest paths for the tiles that belong to a single export plan."""
+    def _tile_paths_from_source_plans(source_plans, tile_format):
+        """Return manifest paths for tiles across all source plans.
+
+        Each path is prefixed with ``{source_index}/`` so it matches the
+        on-disk layout ``tiles_dir/{source_index}/{z}/{x}/{y}.{ext}`` and the
+        archive path ``s/{source_index}/{z}/{x}/{y}.{ext}``.
+        """
         tile_ext = SMPGenerator._tile_extension(tile_format)
         tile_paths = set()
-        for zoom, min_x, max_x, min_y, max_y, _ in tiles_by_zoom:
-            for x in range(min_x, max_x + 1):
-                for y in range(min_y, max_y + 1):
-                    tile_paths.add(f"{zoom}/{x}/{y}.{tile_ext}")
+        for src in source_plans:
+            source_index = src['source_index']
+            for entry in src['tiles_by_zoom']:
+                zoom, min_x, max_x, min_y, max_y, _, _ = entry
+                for x in range(min_x, max_x + 1):
+                    for y in range(min_y, max_y + 1):
+                        tile_paths.add(f"{source_index}/{zoom}/{x}/{y}.{tile_ext}")
         return tile_paths
 
     def estimate_world_tile_count(self, min_zoom, max_zoom):
@@ -591,11 +654,13 @@ class SMPGenerator:
             os.makedirs(style_dir, exist_ok=True)
 
             # Generate the style.json file in the root directory
+            source_plans = export_plan.get('sources', [])
             style = self._create_style_from_canvas(
                 extent, min_zoom, max_zoom, tile_format,
                 include_world_base_zooms=include_world_base_zooms,
                 world_max_zoom=world_max_zoom,
-                source_bounds=export_plan['source_bounds']
+                source_bounds=export_plan['source_bounds'],
+                source_plans=source_plans
             )
             style_path = os.path.join(temp_dir, "style.json")
             with open(style_path, 'w') as f:
@@ -606,8 +671,7 @@ class SMPGenerator:
                 tiles_dir = cache_dir
                 tile_cache = TileCache(cache_dir)
             else:
-                tiles_dir = os.path.join(style_dir, "0")
-                os.makedirs(tiles_dir, exist_ok=True)
+                tiles_dir = style_dir
                 tile_cache = None
             self._generate_tiles_from_canvas(
                 extent, min_zoom, max_zoom, tiles_dir,
@@ -633,7 +697,7 @@ class SMPGenerator:
             # Only needed when cache_dir is used (otherwise tiles_dir is fresh).
             tile_paths = None
             if cache_dir is not None:
-                tile_paths = self._tile_paths_from_plan(export_plan['tiles_by_zoom'], tile_format)
+                tile_paths = self._tile_paths_from_source_plans(source_plans, tile_format)
 
             # Create the SMP file (zip archive)
             archive_built = self._build_smp_archive(
@@ -660,7 +724,7 @@ class SMPGenerator:
 
     def _create_style_from_canvas(self, extent, min_zoom, max_zoom, tile_format=None,
                                  include_world_base_zooms=False, world_max_zoom=3,
-                                 source_bounds=None):
+                                 source_bounds=None, source_plans=None):
         """
         Create a MapLibre style JSON from the current map canvas
 
@@ -668,6 +732,7 @@ class SMPGenerator:
         :param min_zoom: Minimum zoom level
         :param max_zoom: Maximum zoom level
         :param tile_format: Tile image format ('PNG' or 'JPG')
+        :param source_plans: Optional list of per-source plan dicts for multi-source
         :return: Style JSON object
         """
         if tile_format is None:
@@ -675,7 +740,92 @@ class SMPGenerator:
 
         tile_ext = self._tile_extension(tile_format)
 
-        # World low-zoom exports need source bounds that match the actual tile pyramid.
+        # Multi-source style (world enabled with separate sources)
+        if source_plans is not None and len(source_plans) == 2:
+            world_plan = source_plans[0]
+            region_plan = source_plans[1]
+
+            world_bounds = world_plan['source_bounds']
+            region_bounds = region_plan['source_bounds']
+
+            center_lon = (region_bounds[0] + region_bounds[2]) / 2
+            center_lat = (region_bounds[1] + region_bounds[3]) / 2
+
+            default_zoom = min(
+                max_zoom,
+                max(max(min_zoom, 0), min(max_zoom - 2, 11))
+            )
+
+            style = {
+                "version": 8,
+                "name": "QGIS MAP",
+                "sources": {
+                    world_plan['source_id']: {
+                        "format": tile_ext,
+                        "name": "World Overview",
+                        "version": "2.0",
+                        "type": "raster",
+                        "minzoom": world_plan['export_zooms'][0],
+                        "maxzoom": world_plan['export_zooms'][-1],
+                        "scheme": "xyz",
+                        "bounds": world_bounds,
+                        "tiles": [
+                            f"smp://maps.v1/s/{world_plan['source_index']}/{{z}}/{{x}}/{{y}}.{tile_ext}"
+                        ]
+                    },
+                    region_plan['source_id']: {
+                        "format": tile_ext,
+                        "name": "Region Detail",
+                        "version": "2.0",
+                        "type": "raster",
+                        "minzoom": region_plan['export_zooms'][0],
+                        "maxzoom": region_plan['export_zooms'][-1],
+                        "scheme": "xyz",
+                        "bounds": region_bounds,
+                        "tiles": [
+                            f"smp://maps.v1/s/{region_plan['source_index']}/{{z}}/{{x}}/{{y}}.{tile_ext}"
+                        ]
+                    }
+                },
+                "layers": [
+                    {
+                        "id": "background",
+                        "type": "background",
+                        "paint": {
+                            "background-color": "white"
+                        }
+                    },
+                    {
+                        "id": "world-raster",
+                        "type": "raster",
+                        "source": world_plan['source_id'],
+                        "paint": {
+                            "raster-opacity": 1
+                        }
+                    },
+                    {
+                        "id": "region-raster",
+                        "type": "raster",
+                        "source": region_plan['source_id'],
+                        "paint": {
+                            "raster-opacity": 1
+                        }
+                    }
+                ],
+                "metadata": {
+                    "smp:bounds": region_bounds,
+                    "smp:maxzoom": max_zoom,
+                    "smp:sourceFolders": {
+                        world_plan['source_id']: f"s/{world_plan['source_index']}",
+                        region_plan['source_id']: f"s/{region_plan['source_index']}"
+                    }
+                },
+                "center": [center_lon, center_lat],
+                "zoom": default_zoom
+            }
+            return style
+
+        # Single-source style (backward compat, world disabled or source_plans=None)
         if source_bounds is not None:
             bounds = source_bounds
         elif include_world_base_zooms:
@@ -683,7 +833,6 @@ class SMPGenerator:
         else:
             bounds = self._get_bounds_wgs84(extent)
 
-        # Calculate center from bounds
         center_lon = (bounds[0] + bounds[2]) / 2
         center_lat = (bounds[1] + bounds[3]) / 2
 
@@ -691,14 +840,19 @@ class SMPGenerator:
         if include_world_base_zooms:
             effective_min_zoom = min(effective_min_zoom, 0)
 
-        # Keep the initial zoom within the available source range.
         default_zoom = min(
             max_zoom,
             max(max(min_zoom, 0), min(max_zoom - 2, 11))
         )
 
-        # Create a basic style following the bash script reference
-        source_id = "mbtiles-source"
+        # Determine source_id from source_plans if available
+        if source_plans is not None and len(source_plans) == 1:
+            source_id = source_plans[0]['source_id']
+            src_index = source_plans[0]['source_index']
+        else:
+            source_id = "mbtiles-source"
+            src_index = 0
+
         style = {
             "version": 8,
             "name": "QGIS MAP",
@@ -713,7 +867,7 @@ class SMPGenerator:
                     "scheme": "xyz",
                     "bounds": bounds,
                     "tiles": [
-                        f"smp://maps.v1/s/0/{{z}}/{{x}}/{{y}}.{tile_ext}"
+                        f"smp://maps.v1/s/{src_index}/{{z}}/{{x}}/{{y}}.{tile_ext}"
                     ]
                 }
             },
@@ -738,7 +892,7 @@ class SMPGenerator:
                 "smp:bounds": bounds,
                 "smp:maxzoom": max_zoom,
                 "smp:sourceFolders": {
-                    source_id: "s/0"
+                    source_id: f"s/{src_index}"
                 }
             },
             "center": [center_lon, center_lat],
@@ -871,7 +1025,7 @@ class SMPGenerator:
     def _render_single_tile(self, map_settings_template, zoom, x, y, tiles_dir,
                             tile_format, jpeg_quality, resume,
                             tile_cache=None, fingerprint=None,
-                            cancel_event=None):
+                            cancel_event=None, source_index=0):
         """
         Render a single tile and save it to disk.
 
@@ -886,6 +1040,7 @@ class SMPGenerator:
         :param tile_cache: Optional TileCache for freshness checks and updates
         :param fingerprint: Current generation fingerprint
         :param cancel_event: Optional threading.Event; if set, skip rendering
+        :param source_index: Source index for multi-source archives (default 0)
         :return: True if rendered, False if skipped or cancelled
         """
         # Bail out immediately if cancellation has been signalled
@@ -895,12 +1050,12 @@ class SMPGenerator:
         tile_ext = self._tile_extension(tile_format)
         qt_format = self._qt_image_format(tile_format)
 
-        x_dir = os.path.join(tiles_dir, str(zoom), str(x))
+        x_dir = os.path.join(tiles_dir, str(source_index), str(zoom), str(x))
         os.makedirs(x_dir, exist_ok=True)
         tile_path = os.path.join(x_dir, f"{y}.{tile_ext}")
 
         if resume and os.path.exists(tile_path):
-            if tile_cache is None or tile_cache.is_fresh(zoom, x, y, fingerprint):
+            if tile_cache is None or tile_cache.is_fresh(zoom, x, y, fingerprint, source_index=source_index):
                 return False
 
         tile_extent = self._calculate_tile_extent(x, y, zoom)
@@ -956,7 +1111,7 @@ class SMPGenerator:
             raise OSError(f"Failed to save rendered tile: {tile_path}")
 
         if tile_cache is not None:
-            tile_cache.mark(zoom, x, y, fingerprint, defer_save=True)
+            tile_cache.mark(zoom, x, y, fingerprint, defer_save=True, source_index=source_index)
 
         return True
 
@@ -1022,7 +1177,7 @@ class SMPGenerator:
         tile_size = 256
         map_settings.setOutputSize(QSize(tile_size, tile_size))
 
-        for zoom, min_x, max_x, min_y, max_y, num_tiles in tiles_by_zoom:
+        for zoom, min_x, max_x, min_y, max_y, num_tiles, source_index in tiles_by_zoom:
             self.log(
                 f"Zoom level {zoom}: {num_tiles} tiles "
                 f"({max_x - min_x + 1}x{max_y - min_y + 1})"
@@ -1042,10 +1197,10 @@ class SMPGenerator:
             self.feedback.setProgress(0)
 
         def iter_tile_tasks():
-            for zoom, min_x, max_x, min_y, max_y, _ in tiles_by_zoom:
+            for zoom, min_x, max_x, min_y, max_y, _, source_index in tiles_by_zoom:
                 for x in range(min_x, max_x + 1):
                     for y in range(min_y, max_y + 1):
-                        yield (zoom, x, y)
+                        yield (zoom, x, y, source_index)
 
         with ThreadPoolExecutor(max_workers=effective_workers) as executor:
             futures = {}
@@ -1058,7 +1213,7 @@ class SMPGenerator:
                         return
 
                     try:
-                        zoom, x, y = next(tile_tasks)
+                        zoom, x, y, source_index = next(tile_tasks)
                     except StopIteration:
                         return
 
@@ -1066,9 +1221,10 @@ class SMPGenerator:
                         self._render_single_tile,
                         map_settings, zoom, x, y, tiles_dir,
                         tile_format, jpeg_quality, resume,
-                        tile_cache, fingerprint, cancel_event
+                        tile_cache, fingerprint, cancel_event,
+                        source_index=source_index
                     )
-                    futures[future] = (zoom, x, y)
+                    futures[future] = (zoom, x, y, source_index)
 
             submit_pending()
 
@@ -1159,7 +1315,7 @@ class SMPGenerator:
                     rel = os.path.relpath(fp, tiles_dir).replace(os.sep, '/')
                     if tile_paths is not None and rel not in tile_paths:
                         continue
-                    tile_entries.append((fp, 's/0/' + rel))
+                    tile_entries.append((fp, 's/' + rel))
                 if cancelled:
                     break
 

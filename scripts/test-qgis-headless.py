@@ -138,7 +138,7 @@ try:
     tiles_dir = os.path.join(tmp, 'tiles')
     identical = b'\x89PNG\r\n\x1a\n' + b'\x00' * 100
     for z, x, y in [(0, 0, 0), (1, 0, 0), (1, 0, 1), (1, 1, 0), (1, 1, 1)]:
-        d = os.path.join(tiles_dir, str(z), str(x))
+        d = os.path.join(tiles_dir, '0', str(z), str(x))
         os.makedirs(d, exist_ok=True)
         with open(os.path.join(d, '{}.png'.format(y)), 'wb') as f:
             f.write(identical)
@@ -177,7 +177,11 @@ try:
     check("generate_smp returns None on cancel", r1 is None)
 
     fb2 = MagicMock()
-    fb2.isCanceled.side_effect = [False]*7 + [True]
+    # Wrapper os.walk: 1 (before loop) + 5 (one per tile) = 6 False calls
+    # Phase 1 hashing: 5 calls (all False, completes)
+    # Phase 2 tile-writing: 1 call (False, unique tile written)
+    # Phase 2 CD writing: True on first CD entry
+    fb2.isCanceled.side_effect = [False]*6 + [False]*5 + [False] + [True]
     g2 = SMPGenerator(feedback=fb2)
     r2 = g2._build_smp_archive(
         style_path, tiles_dir, os.path.join(tmp, 'c2.smp'), dedup=True
