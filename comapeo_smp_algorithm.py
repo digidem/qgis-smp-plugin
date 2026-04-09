@@ -38,6 +38,7 @@ from qgis.core import (QgsProcessingAlgorithm,
                        QgsProcessingParameterFileDestination,
                        QgsProcessingParameterBoolean,
                        QgsProcessingException,
+                       QgsProject,
                        QgsRectangle)
 
 from .comapeo_smp_generator import SMPGenerator
@@ -121,7 +122,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                 self.TILE_FORMAT,
                 self.tr('Tile image format'),
                 options=self.TILE_FORMAT_OPTIONS,
-                defaultValue=1,  # JPG
+                defaultValue=2,  # WEBP
                 optional=False
             )
         )
@@ -143,7 +144,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterBoolean(
                 self.INCLUDE_WORLD_BASE_ZOOMS,
                 self.tr('Include world tiles for low zoom levels'),
-                defaultValue=False,
+                defaultValue=True,
                 optional=False
             )
         )
@@ -161,11 +162,27 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
         )
 
         # Add output file parameter
+        # Default to project name if available, otherwise 'output'
+        project = QgsProject.instance()
+        project_name = project.title() if project else ''
+        if not project_name:
+            base_name = 'output'
+        else:
+            # Sanitize: replace spaces and special chars
+            base_name = ''.join(
+                c if c.isalnum() or c in '-_' else '_'
+                for c in project_name
+            ).rstrip('_')
+            if not base_name:
+                base_name = 'output'
+        default_output = base_name + '.smp'
+
         self.addParameter(
             QgsProcessingParameterFileDestination(
                 self.OUTPUT_FILE,
                 self.tr('Output SMP file'),
-                fileFilter='SMP files (*.smp)'
+                fileFilter='SMP files (*.smp)',
+                defaultValue=default_output
             )
         )
 
