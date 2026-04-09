@@ -1434,7 +1434,7 @@ class TestGenerateSmpCancellation(unittest.TestCase):
             out = os.path.join(tmp, 'test.smp')
 
             def fake_generate(_extent, _min_zoom, _max_zoom, tiles_dir, **_kwargs):
-                tile_dir = os.path.join(tiles_dir, '0', '0')
+                tile_dir = os.path.join(tiles_dir, '0', '0', '0')
                 os.makedirs(tile_dir, exist_ok=True)
                 with open(os.path.join(tile_dir, '0.png'), 'wb') as fh:
                     fh.write(b'\x89PNG')
@@ -2221,7 +2221,7 @@ class TestVersionFileInArchive(unittest.TestCase):
             json.dump({"version": 8, "sources": {}, "layers": []}, f)
 
         tiles_dir = os.path.join(self.tmp, 'tiles')
-        tile_file_dir = os.path.join(tiles_dir, '0', '0')
+        tile_file_dir = os.path.join(tiles_dir, '0', '0', '0')
         os.makedirs(tile_file_dir, exist_ok=True)
         with open(os.path.join(tile_file_dir, '0.png'), 'wb') as f:
             f.write(b'\x89PNG\r\n\x1a\n')
@@ -2507,6 +2507,7 @@ class TestTileDeduplication(unittest.TestCase):
         """
         import zipfile
         import struct
+        import warnings as _warnings
         identical_content = b'\x89PNG\r\n\x1a\n' + b'\x00' * 100
         smp = self._build_smp_with_duplicate_tiles(dedup_enabled=True)
         with zipfile.ZipFile(smp) as zf:
@@ -2517,7 +2518,9 @@ class TestTileDeduplication(unittest.TestCase):
                     first_names.add(info.filename)
                     break  # only check first tile
             for name in first_names:
-                content = zf.read(name)
+                with _warnings.catch_warnings():
+                    _warnings.simplefilter("ignore", UserWarning)
+                    content = zf.read(name)
                 self.assertEqual(content, identical_content,
                                  f"Tile {name} content mismatch after dedup")
 
@@ -3374,6 +3377,26 @@ class TestMultiSourceExportPlan(unittest.TestCase):
         # No source_index=1 entries
         self.assertFalse(any(t[6] == 1 for t in plan['tiles_by_zoom']))
 
+    def test_world_tiles_backward_compat_when_disabled(self):
+        """world_tiles formula must also hold when world tiles are disabled."""
+        plan = self.gen._build_export_plan(
+            self.user_extent, 5, 10,
+            include_world_base_zooms=False
+        )
+        export_zooms = plan['export_zooms']
+        expected_world_tiles = sum(4**z for z in export_zooms)
+        self.assertEqual(plan['world_tiles'], expected_world_tiles)
+
+    def test_world_pct_backward_compat_when_disabled(self):
+        """world_pct formula must also hold when world tiles are disabled."""
+        plan = self.gen._build_export_plan(
+            self.user_extent, 5, 10,
+            include_world_base_zooms=False
+        )
+        if plan['world_tiles'] > 0:
+            expected_pct = (plan['total_tiles'] / plan['world_tiles']) * 100
+            self.assertAlmostEqual(plan['world_pct'], expected_pct, places=5)
+
 
 class TestMultiSourceStyleJson(unittest.TestCase):
     """Tests for _create_style_from_canvas with source_plans."""
@@ -4139,6 +4162,91 @@ class TestSMPRoundtripMultiSource(unittest.TestCase):
             self.assertGreater(len(matching), 0,
                                f"No entries under {folder} for source {src_id}")
 
+    def test_tile_counts_match_source_plans(self):
+        """Tile counts under s/0/ and s/1/ should match source plan totals."""
+        gen = SMPGenerator()
+        import json, zipfile
+
+        # Build a real export plan to get accurate tile counts
+        gen._get_bounds_wgs84 = lambda ext: [
+            ext.xMinimum(), ext.yMinimum(), ext.xMaximum(), ext.yMaximum()
+        ]
+        plan = gen._build_export_plan(
+            _FakeRectangle(-1, -1, 1, 1), 0, 2,
+            include_world_base_zooms=True, world_max_zoom=1
+        )
+
+        world_plan = plan['sources'][0]
+        region_plan = plan['sources'][1]
+
+        tiles_dir = os.path.join(self.tmp, 'tiles')
+
+        # Create tiles for both sources
+        for sp in plan['sources']:
+            for zoom, min_x, max_x, min_y, max_y, _, si in sp['tiles_by_zoom']:
+                for x in range(min_x, max_x + 1):
+                    for y in range(min_y, max_y + 1):
+                        d = os.path.join(tiles_dir, str(si), str(zoom), str(x))
+                        os.makedirs(d, exist_ok=True)
+                        with open(os.path.join(d, f'{y}.png'), 'wb') as f:
+                            f.write(b'\x89PNG\r\n\x1a\n')
+
+        style = {
+            "version": 8,
+            "sources": {
+                "world-overview": {
+                    "type": "raster", "format": "png",
+                    "minzoom": 0, "maxzoom": 1,
+                    "bounds": [-180, -85.0511, 180, 85.0511],
+                    "tiles": ["smp://maps.v1/s/0/{z}/{x}/{y}.png"]
+                },
+                "region-detail": {
+                    "type": "raster", "format": "png",
+                    "minzoom": 0, "maxzoom": 2,
+                    "bounds": [-1, -1, 1, 1],
+                    "tiles": ["smp://maps.v1/s/1/{z}/{x}/{y}.png"]
+                }
+            },
+            "layers": [
+                {"id": "background", "type": "background",
+                 "paint": {"background-color": "white"}},
+                {"id": "world-raster", "type": "raster", "source": "world-overview"},
+                {"id": "region-raster", "type": "raster", "source": "region-detail"}
+            ],
+            "metadata": {
+                "smp:bounds": [-1, -1, 1, 1],
+                "smp:maxzoom": 2,
+                "smp:sourceFolders": {
+                    "world-overview": "s/0",
+                    "region-detail": "s/1"
+                }
+            },
+            "center": [0, 0],
+            "zoom": 5
+        }
+
+        style_path = os.path.join(self.tmp, 'style_plan.json')
+        with open(style_path, 'w') as f:
+            json.dump(style, f)
+
+        out_path = os.path.join(self.tmp, 'counts.smp')
+        gen._build_smp_archive(
+            style_path=style_path,
+            tiles_dir=tiles_dir,
+            output_path=out_path
+        )
+
+        with zipfile.ZipFile(out_path) as zf:
+            names = zf.namelist()
+
+        s0_count = len([n for n in names if n.startswith('s/0/') and n.endswith('.png')])
+        s1_count = len([n for n in names if n.startswith('s/1/') and n.endswith('.png')])
+
+        self.assertEqual(s0_count, world_plan['total_tiles'],
+                         f"s/0/ tile count {s0_count} != world plan total {world_plan['total_tiles']}")
+        self.assertEqual(s1_count, region_plan['total_tiles'],
+                         f"s/1/ tile count {s1_count} != region plan total {region_plan['total_tiles']}")
+
 
 class TestDedupWithOverlappingZooms(unittest.TestCase):
     """Dedup must not collapse cross-source tiles even when content is identical."""
@@ -4264,6 +4372,60 @@ class TestGenerateSmpOrchestrationMultiSource(unittest.TestCase):
             tiles_dir_arg.endswith('/s/0'),
             f"tiles_dir should NOT end with /s/0, got {tiles_dir_arg}"
         )
+
+
+class TestCancellationMidSource(unittest.TestCase):
+    """Cancellation between sources: resume must skip cached source 0, re-render source 1."""
+
+    def setUp(self):
+        self.gen = SMPGenerator()
+        self.gen._get_bounds_wgs84 = lambda ext: [
+            ext.xMinimum(), ext.yMinimum(), ext.xMaximum(), ext.yMaximum()
+        ]
+
+    def test_resume_skips_cached_source_zero(self):
+        """After cancel between sources, resume reuses source 0 tiles from cache."""
+        import tempfile, shutil, json, zipfile
+        from unittest.mock import MagicMock, patch
+
+        tmp = tempfile.mkdtemp()
+        try:
+            # Build an export plan with 2 sources (world enabled)
+            plan = self.gen._build_export_plan(
+                _FakeRectangle(-1, -1, 1, 1), 0, 2,
+                include_world_base_zooms=True, world_max_zoom=1
+            )
+            self.assertEqual(len(plan['sources']), 2)
+
+            # Source 0 tiles (world, zooms 0-1)
+            world_tiles = [t for t in plan['tiles_by_zoom'] if t[6] == 0]
+            # Source 1 tiles (region, zooms 0-2)
+            region_tiles = [t for t in plan['tiles_by_zoom'] if t[6] == 1]
+
+            tiles_dir = os.path.join(tmp, 'tiles')
+
+            # Pre-create source 0 tiles (simulating they were rendered before cancel)
+            for zoom, min_x, max_x, min_y, max_y, num_tiles, source_index in world_tiles:
+                for x in range(min_x, max_x + 1):
+                    for y in range(min_y, max_y + 1):
+                        d = os.path.join(tiles_dir, str(source_index), str(zoom), str(x))
+                        os.makedirs(d, exist_ok=True)
+                        with open(os.path.join(d, f'{y}.png'), 'wb') as f:
+                            f.write(b'\x89PNG\r\n\x1a\n')
+
+            # Verify source 0 tiles exist on disk
+            s0_files = []
+            for root, dirs, files in os.walk(tiles_dir):
+                for fn in files:
+                    s0_files.append(os.path.join(root, fn))
+            self.assertGreater(len(s0_files), 0, 'Source 0 tiles should exist')
+
+            # Source 1 tiles should NOT exist yet (not rendered before cancel)
+            s1_dir = os.path.join(tiles_dir, '1')
+            self.assertFalse(os.path.exists(s1_dir),
+                             'Source 1 tiles should not exist before resume')
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == '__main__':
