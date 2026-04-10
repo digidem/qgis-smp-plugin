@@ -7,7 +7,7 @@
 
 import sys
 import getpass
-import xmlrpc.client
+import xmlrpc.client  # nosec B411 — dev-only upload tool, not shipped in plugin; connects only to trusted plugins.qgis.org over HTTPS
 from optparse import OptionParser
 
 standard_library.install_aliases()

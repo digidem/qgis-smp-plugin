@@ -1,0 +1,23 @@
+# Files excluded from release archives (git archive / make package)
+# Shell scripts — dev-only, not for distribution
+generate_smp_from_xyz.sh       export-ignore
+install-dev.sh                 export-ignore
+scripts/compile-strings.sh     export-ignore
+scripts/run-env-linux.sh       export-ignore
+scripts/update-strings.sh      export-ignore
+
+# Test and CI
+test/                          export-ignore
+scripts/test-qgis-headless.py  export-ignore
+
+# Dev tooling
+.claude/                       export-ignore
+.codex                         export-ignore
+.flake8                        export-ignore
+pylintrc                       export-ignore
+Makefile                       export-ignore
+
+# Working docs and plans
+docs/                          export-ignore
+plan-*.md                      export-ignore
+research-*.md                  export-ignore

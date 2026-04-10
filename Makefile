@@ -190,6 +190,8 @@ package: compile
 	@echo "------------------------------------"
 	rm -f $(PLUGINNAME).zip
 	git archive --prefix=$(PLUGINNAME)/ -o $(PLUGINNAME).zip $(VERSION)
+	@# Safety net: remove any .sh scripts that slipped through
+	zip -d $(PLUGINNAME).zip '$(PLUGINNAME)/*.sh' '$(PLUGINNAME)/scripts/*.sh' 2>/dev/null || true
 	echo "Created package: $(PLUGINNAME).zip"
 
 upload: zip
@@ -261,6 +263,20 @@ pep8:
 	@echo "-----------"
 	@echo "Ignored in PEP8 check:"
 	@echo $(PEP8EXCLUDE)
+
+bandit:
+	@echo
+	@echo "----------------"
+	@echo "Bandit security check"
+	@echo "----------------"
+	@bandit -r . -c bandit.yaml -f txt || true
+	@echo "----------------"
+
+bandit-report:
+	@echo
+	@echo "Writing bandit-results.json ..."
+	@bandit -r . -c bandit.yaml -f json -o bandit-results.json --exit-zero
+	@echo "Report written to bandit-results.json"
 
 # Run flake8 style checking
 # http://pypi.python.org/pypi/flake8

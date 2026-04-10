@@ -1,0 +1,6 @@
+exclude_dirs:
+  - test
+  - scripts
+  - .git
+skips:
+  - B101  # assert_used — common in test stubs included via PYTHONPATH
