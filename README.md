@@ -1,5 +1,10 @@
 # CoMapeo SMP Plugin for QGIS
 
+[![Tests](https://github.com/digidem/qgis-smp-plugin/actions/workflows/test.yml/badge.svg)](https://github.com/digidem/qgis-smp-plugin/actions/workflows/test.yml)
+[![Lint](https://github.com/digidem/qgis-smp-plugin/actions/workflows/lint.yml/badge.svg)](https://github.com/digidem/qgis-smp-plugin/actions/workflows/lint.yml)
+[![Security](https://github.com/digidem/qgis-smp-plugin/actions/workflows/security.yml/badge.svg)](https://github.com/digidem/qgis-smp-plugin/actions/workflows/security.yml)
+[![Release](https://img.shields.io/github/v/release/digidem/qgis-smp-plugin)](https://github.com/digidem/qgis-smp-plugin/releases)
+
 This QGIS plugin generates Styled Map Package (SMP) files for use with CoMapeo, allowing you to create offline maps from your QGIS projects.
 
 ## What is an SMP file?
