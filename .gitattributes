@@ -30,12 +30,7 @@ requirements.txt               export-ignore
 AGENTS.md                      export-ignore
 CLAUDE.md                      export-ignore
 CONTRIBUTING.md                export-ignore
-IMPLEMENTATION_SUMMARY.md      export-ignore
-REVIEW_TASKS.md                export-ignore
-TASKS.md                       export-ignore
-UPDATE.md                      export-ignore
 README.html                    export-ignore
-XYZ_SMP.md                    export-ignore
 help/                          export-ignore
 
 # Working docs and plans

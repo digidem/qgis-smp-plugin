@@ -89,14 +89,6 @@ default:
 	@echo You can install pb_tool using: pip install pb_tool
 	@echo See https://g-sherman.github.io/plugin_build_tool/ for info. 
 
-compile: $(COMPILED_RESOURCE_FILES)
-
-%.py : %.qrc $(RESOURCES_SRC)
-	pyrcc5 -o $*.py  $<
-
-%.qm : %.ts
-	$(LRELEASE) $<
-
 # Reliable QGIS-free logic tests — this is the default `make test` path.
 test: test-logic
 
@@ -112,7 +104,7 @@ test-logic:
 # WARNING: this target silences failures with '|| true'; a passing exit code
 # does NOT mean tests ran or passed.  Use 'make test' or 'make test-logic'
 # for reliable local verification.
-test-legacy: compile transcompile
+test-legacy:
 	@echo
 	@echo "----------------------"
 	@echo "Regression Test Suite (legacy - see 'make test' for reliable tests)"
@@ -130,7 +122,7 @@ test-legacy: compile transcompile
 	@echo "e.g. source run-env-linux.sh <path to qgis install>; make test-legacy"
 	@echo "----------------------"
 
-deploy: compile doc transcompile
+deploy: doc
 	@echo
 	@echo "------------------------------------------"
 	@echo "Deploying plugin to your QGIS plugin directory."
@@ -178,7 +170,7 @@ zip: deploy dclean
 	rm -f $(PLUGINNAME).zip
 	cd $(QGIS_PLUGIN_DIR); zip -9r $(CURDIR)/$(PLUGINNAME).zip $(PLUGINNAME)
 
-package: compile
+package:
 	# Create a zip package of the plugin named $(PLUGINNAME).zip.
 	# This requires use of git (your plugin development directory must be a
 	# git repository).
@@ -200,29 +192,6 @@ upload: zip
 	@echo "Uploading plugin to QGIS Plugin repo."
 	@echo "-------------------------------------"
 	$(PLUGIN_UPLOAD) $(PLUGINNAME).zip
-
-transup:
-	@echo
-	@echo "------------------------------------------------"
-	@echo "Updating translation files with any new strings."
-	@echo "------------------------------------------------"
-	@chmod +x scripts/update-strings.sh
-	@scripts/update-strings.sh $(LOCALES)
-
-transcompile:
-	@echo
-	@echo "----------------------------------------"
-	@echo "Compiled translation files to .qm files."
-	@echo "----------------------------------------"
-	@chmod +x scripts/compile-strings.sh
-	@scripts/compile-strings.sh $(LRELEASE) $(LOCALES)
-
-transclean:
-	@echo
-	@echo "------------------------------------"
-	@echo "Removing compiled translation files."
-	@echo "------------------------------------"
-	rm -f i18n/*.qm
 
 clean:
 	@echo

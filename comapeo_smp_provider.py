@@ -55,7 +55,6 @@ class ComapeoMapBuilderProvider(QgsProcessingProvider):
         """
         self.addAlgorithm(ComapeoMapBuilderAlgorithm())
         # add additional algorithms here
-        # self.addAlgorithm(MyOtherAlgorithm())
 
     def id(self):
         """

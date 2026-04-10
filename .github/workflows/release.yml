@@ -62,7 +62,7 @@ jobs:
           echo "Total files: $(zipinfo -1 "comapeo_smp_v${VERSION}.zip" | wc -l)"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: comapeo_smp_v${{ steps.meta.outputs.version }}
           path: comapeo_smp_v${{ steps.meta.outputs.version }}.zip
