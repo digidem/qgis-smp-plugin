@@ -815,6 +815,13 @@ class SMPGenerator:
                 shutil.rmtree(temp_dir)
                 self.log(f"Cleaned up temporary directory: {temp_dir}")
 
+    def _project_title_or_default(self):
+        """Return the current project title or the legacy default style name."""
+        title = QgsProject.instance().title()
+        if isinstance(title, str) and title.strip():
+            return title
+        return "QGIS MAP"
+
     def _create_style_from_canvas(self, extent, min_zoom, max_zoom, tile_format=None,
                                  include_world_base_zooms=False, world_max_zoom=3,
                                  source_bounds=None, source_plans=None):
@@ -851,7 +858,7 @@ class SMPGenerator:
 
             style = {
                 "version": 8,
-                "name": "QGIS MAP",
+                "name": self._project_title_or_default(),
                 "sources": {
                     world_plan['source_id']: {
                         "format": tile_ext,
@@ -948,7 +955,7 @@ class SMPGenerator:
 
         style = {
             "version": 8,
-            "name": "QGIS MAP",
+            "name": self._project_title_or_default(),
             "sources": {
                 source_id: {
                     "format": tile_ext,

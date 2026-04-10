@@ -1297,6 +1297,58 @@ class TestLowZoomStyleOutput(unittest.TestCase):
     def _make_extent(self):
         return _FakeRectangle(-10, -10, 10, 10)
 
+    def test_uses_non_empty_qgis_project_title_for_style_name(self):
+        fake_project = MagicMock()
+        fake_project.title.return_value = 'Community Atlas'
+
+        with patch('comapeo_smp_generator.QgsProject.instance', return_value=fake_project):
+            style = self.gen._create_style_from_canvas(self._make_extent(), 0, 2)
+
+        self.assertEqual(style['name'], 'Community Atlas')
+
+    def test_uses_non_empty_qgis_project_title_for_multi_source_style_name(self):
+        fake_project = MagicMock()
+        fake_project.title.return_value = 'Community Atlas'
+        source_plans = [
+            {
+                'source_id': 'world-source',
+                'source_index': 0,
+                'source_bounds': [-180, -85.0511, 180, 85.0511],
+                'export_zooms': [0, 1, 2],
+            },
+            {
+                'source_id': 'region-source',
+                'source_index': 1,
+                'source_bounds': [-10, -10, 10, 10],
+                'export_zooms': [3, 4, 5],
+            },
+        ]
+
+        with patch('comapeo_smp_generator.QgsProject.instance', return_value=fake_project):
+            style = self.gen._create_style_from_canvas(
+                self._make_extent(), 0, 5, source_plans=source_plans
+            )
+
+        self.assertEqual(style['name'], 'Community Atlas')
+
+    def test_falls_back_to_qgis_map_when_project_title_is_empty(self):
+        fake_project = MagicMock()
+        fake_project.title.return_value = '   '
+
+        with patch('comapeo_smp_generator.QgsProject.instance', return_value=fake_project):
+            style = self.gen._create_style_from_canvas(self._make_extent(), 0, 2)
+
+        self.assertEqual(style['name'], 'QGIS MAP')
+
+    def test_falls_back_to_qgis_map_when_project_title_is_none(self):
+        fake_project = MagicMock()
+        fake_project.title.return_value = None
+
+        with patch('comapeo_smp_generator.QgsProject.instance', return_value=fake_project):
+            style = self.gen._create_style_from_canvas(self._make_extent(), 0, 2)
+
+        self.assertEqual(style['name'], 'QGIS MAP')
+
     def test_max_zoom_0_default_zoom_non_negative(self):
         style = self.gen._create_style_from_canvas(self._make_extent(), 0, 0)
         self.assertGreaterEqual(style['zoom'], 0)
