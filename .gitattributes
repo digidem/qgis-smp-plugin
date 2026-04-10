@@ -16,6 +16,29 @@ scripts/test-qgis-headless.py  export-ignore
 .flake8                        export-ignore
 pylintrc                       export-ignore
 Makefile                       export-ignore
+bandit.yaml                    export-ignore
+setup.cfg                      export-ignore
+.pre-commit-config.yaml        export-ignore
+.gitattributes                 export-ignore
+.gitignore                     export-ignore
+pb_tool.cfg                    export-ignore
+plugin_upload.py               export-ignore
+requirements.txt               export-ignore
+
+# CI
+.github/                       export-ignore
+
+# Dev docs
+AGENTS.md                      export-ignore
+CLAUDE.md                      export-ignore
+CONTRIBUTING.md                export-ignore
+IMPLEMENTATION_SUMMARY.md      export-ignore
+REVIEW_TASKS.md                export-ignore
+TASKS.md                       export-ignore
+UPDATE.md                      export-ignore
+README.html                    export-ignore
+XYZ_SMP.md                    export-ignore
+help/                          export-ignore
 
 # Working docs and plans
 docs/                          export-ignore

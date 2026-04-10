@@ -26,10 +26,10 @@ Operational instructions for coding agents working in this repository.
 
 ## Release Process
 
-Releases are fully automated via `.github/workflows/release.yml`. On every push
-to `main` (except changes under `.github/`, `README.md`, and `LICENSE`) the
-workflow reads `version=` from `metadata.txt`, packages the plugin zip, and
-publishes a GitHub Release tagged `v{VERSION}`.
+Releases are triggered by publishing a GitHub Release. The workflow
+(`.github/workflows/release.yml`) fires on `release: published`, validates that
+the release tag matches `metadata.txt`, extracts the changelog for that version,
+builds the plugin zip via `git archive`, and attaches it to the release.
 
 **Steps to cut a release:**
 
@@ -46,26 +46,32 @@ publishes a GitHub Release tagged `v{VERSION}`.
    * Another change
    ```
 
-3. **Commit** with a conventional message:
+3. **Commit and push to `main`**:
    ```
    git commit -m "Release vX.Y.Z — <one-line summary>"
+   git push
    ```
 
-4. **Push to `main`** — the release workflow fires automatically, creates the
-   GitHub Release, and attaches `comapeo_smp_vX.Y.Z.zip`.
+4. **Create the GitHub Release** at
+   `https://github.com/digidem/qgis-smp-plugin/releases/new`:
+   - Tag: `vX.Y.Z` (must exactly match `v` + version in `metadata.txt`)
+   - Title: `Release vX.Y.Z`
+   - Click **Publish release**
 
-5. **Verify** the release appeared at
+5. The workflow fires automatically: validates the tag, extracts the changelog
+   as the release body, builds `comapeo_smp_vX.Y.Z.zip` via `git archive`,
+   and attaches it to the release.
+
+6. **Verify** the release at
    `https://github.com/digidem/qgis-smp-plugin/releases`.
 
 **Important:**
-- The release workflow triggers on *any* push to `main` that touches non-ignored
-  paths (including source files, Makefile, config files, etc.). If you push
-  without bumping the version, the workflow will attempt to re-create the
-  existing tag — this will overwrite the release artifact with the current HEAD.
-  Always bump the version before pushing changes intended as a new release.
+- The tag name must be exactly `v` + the `version=` value in `metadata.txt`.
+  If they don't match the workflow will fail with a clear error.
 - Do not bump `metadata.txt` version unless this is a release commit.
-- The zip packages only the five plugin source files plus `metadata.txt` — it
-  does not include tests, scripts, or dev tooling.
+- The zip is built with `git archive` and `.gitattributes` `export-ignore`
+  rules strip dev files (tests, CI, tooling). Only plugin source files,
+  `metadata.txt`, `LICENSE`, `README.md`, and `i18n/` are included.
 
 ## Commands
 

@@ -1,47 +1,77 @@
-name: Create Release
+name: Release
 
 on:
-  push:
-    branches:
-      - main
-    paths-ignore:
-      - '.github/**'
-      - 'README.md'
-      - 'LICENSE'
+  release:
+    types: [published]
+
+permissions:
+  contents: write
 
 jobs:
-  build:
+  release:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
         with:
-          python-version: '3.10'
+          fetch-depth: 0
 
-      - name: Get version from metadata.txt
-        id: get_version
+      - name: Extract version from metadata.txt
+        id: meta
         run: |
-          VERSION=$(grep "^version=" metadata.txt | cut -d'=' -f2)
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          VERSION=$(grep '^version=' metadata.txt | head -1 | cut -d'=' -f2)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Create plugin package
+          TAG="${GITHUB_REF_NAME}"
+          if [ "$TAG" != "v${VERSION}" ]; then
+            echo "::error::Tag '$TAG' does not match metadata.txt version 'v${VERSION}'"
+            exit 1
+          fi
+
+      - name: Extract changelog for current version
+        id: changelog
         run: |
-          mkdir -p comapeo_smp
-          cp -r __init__.py comapeo_smp.py comapeo_smp_algorithm.py comapeo_smp_generator.py comapeo_smp_provider.py metadata.txt comapeo_smp/
-          zip -r comapeo_smp_v${{ env.VERSION }}.zip comapeo_smp
+          VERSION="${{ steps.meta.outputs.version }}"
+          CHANGELOG=$(awk -v ver="$VERSION" '
+            /^changelog=/ { in_block=1; next }
+            /^[a-z]/ && !/^changelog=/ { in_block=0 }
+            in_block {
+              line = $0
+              gsub(/^    /, "", line)
+              if (match(line, "^[0-9]+\\.[0-9]+")) {
+                capture = (index(line, ver) == 1) ? 1 : 0
+                next
+              }
+              if (capture) {
+                if (body != "") body = body "\n"
+                body = body line
+              }
+            }
+            END { print body }
+          ' metadata.txt)
 
-      - name: Create Release
-        id: create_release
+          echo "body<<CHANGELOG_EOF" >> "$GITHUB_OUTPUT"
+          echo "$CHANGELOG" >> "$GITHUB_OUTPUT"
+          echo "CHANGELOG_EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Build plugin zip
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+          git archive --prefix=comapeo_smp/ -o "comapeo_smp_v${VERSION}.zip" HEAD
+          echo "Archive contents:"
+          zipinfo -1 "comapeo_smp_v${VERSION}.zip" | head -20
+          echo "Total files: $(zipinfo -1 "comapeo_smp_v${VERSION}.zip" | wc -l)"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: comapeo_smp_v${{ steps.meta.outputs.version }}
+          path: comapeo_smp_v${{ steps.meta.outputs.version }}.zip
+          retention-days: 90
+
+      - name: Attach to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.get_version.outputs.version }}
-          name: Release v${{ steps.get_version.outputs.version }}
-          draft: false
-          prerelease: false
-          files: comapeo_smp_v${{ env.VERSION }}.zip
+          body: ${{ steps.changelog.outputs.body }}
+          files: comapeo_smp_v${{ steps.meta.outputs.version }}.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
