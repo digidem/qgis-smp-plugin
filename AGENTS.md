@@ -21,8 +21,51 @@ Operational instructions for coding agents working in this repository.
   without first checking the file lists; current legacy targets can omit core
   runtime modules.
 - Do not run deployment or destructive make targets unless explicitly requested: `make deploy`, `make dclean`, `make derase`, `make zip`, `make upload`.
-- Do not bump `metadata.txt` version or edit release workflow details unless the user asked for a release/version change.
+- Do not bump `metadata.txt` version or add a changelog entry unless the user explicitly asked for a release/version change. Every push to `main` triggers the release workflow — bumping the version is the release act itself.
 - Do not rewrite large plugin-builder header blocks unless needed for the task.
+
+## Release Process
+
+Releases are fully automated via `.github/workflows/release.yml`. On every push
+to `main` (except changes under `.github/`, `README.md`, and `LICENSE`) the
+workflow reads `version=` from `metadata.txt`, packages the plugin zip, and
+publishes a GitHub Release tagged `v{VERSION}`.
+
+**Steps to cut a release:**
+
+1. **Bump the version** in `metadata.txt`:
+   ```
+   version=X.Y.Z
+   ```
+
+2. **Add a changelog entry** at the top of the `changelog=` block in
+   `metadata.txt`, following the existing format:
+   ```
+   X.Y.Z - Short summary of the release
+   * Bullet point describing each change
+   * Another change
+   ```
+
+3. **Commit** with a conventional message:
+   ```
+   git commit -m "Release vX.Y.Z — <one-line summary>"
+   ```
+
+4. **Push to `main`** — the release workflow fires automatically, creates the
+   GitHub Release, and attaches `comapeo_smp_vX.Y.Z.zip`.
+
+5. **Verify** the release appeared at
+   `https://github.com/digidem/qgis-smp-plugin/releases`.
+
+**Important:**
+- The release workflow triggers on *any* push to `main` that touches non-ignored
+  paths (including source files, Makefile, config files, etc.). If you push
+  without bumping the version, the workflow will attempt to re-create the
+  existing tag — this will overwrite the release artifact with the current HEAD.
+  Always bump the version before pushing changes intended as a new release.
+- Do not bump `metadata.txt` version unless this is a release commit.
+- The zip packages only the five plugin source files plus `metadata.txt` — it
+  does not include tests, scripts, or dev tooling.
 
 ## Commands
 
@@ -41,6 +84,7 @@ Operational instructions for coding agents working in this repository.
   `make test-legacy`
 - Lint command (non-blocking by Makefile design): `make pylint`
 - Style command (non-blocking by Makefile design): `make pep8`
+- Security scan: `make bandit` (screen) or `make bandit-report` (JSON file)
 - Package build: `make package VERSION=X.Y.Z`
 
 ## Safety and Permissions
