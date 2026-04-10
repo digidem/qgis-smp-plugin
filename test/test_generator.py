@@ -57,6 +57,9 @@ class _FakeProject:
     def title(self):
         return ''
 
+    def baseName(self):
+        return ''
+
     def crs(self):
         return _FakeCrs()
 
@@ -1343,6 +1346,36 @@ class TestLowZoomStyleOutput(unittest.TestCase):
     def test_falls_back_to_qgis_map_when_project_title_is_none(self):
         fake_project = MagicMock()
         fake_project.title.return_value = None
+
+        with patch('comapeo_smp_generator.QgsProject.instance', return_value=fake_project):
+            style = self.gen._create_style_from_canvas(self._make_extent(), 0, 2)
+
+        self.assertEqual(style['name'], 'QGIS MAP')
+
+    def test_uses_project_filename_when_title_is_empty(self):
+        fake_project = MagicMock()
+        fake_project.title.return_value = ''
+        fake_project.baseName.return_value = 'my_project'
+
+        with patch('comapeo_smp_generator.QgsProject.instance', return_value=fake_project):
+            style = self.gen._create_style_from_canvas(self._make_extent(), 0, 2)
+
+        self.assertEqual(style['name'], 'my_project')
+
+    def test_title_takes_precedence_over_filename(self):
+        fake_project = MagicMock()
+        fake_project.title.return_value = 'My Title'
+        fake_project.baseName.return_value = 'my_project'
+
+        with patch('comapeo_smp_generator.QgsProject.instance', return_value=fake_project):
+            style = self.gen._create_style_from_canvas(self._make_extent(), 0, 2)
+
+        self.assertEqual(style['name'], 'My Title')
+
+    def test_falls_back_to_qgis_map_when_both_empty(self):
+        fake_project = MagicMock()
+        fake_project.title.return_value = ''
+        fake_project.baseName.return_value = ''
 
         with patch('comapeo_smp_generator.QgsProject.instance', return_value=fake_project):
             style = self.gen._create_style_from_canvas(self._make_extent(), 0, 2)

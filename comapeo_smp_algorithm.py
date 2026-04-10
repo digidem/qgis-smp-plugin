@@ -175,9 +175,17 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
         )
 
         # Add output file parameter
-        # Default to project name if available, otherwise 'output'
+        # Default to project title, then filename, otherwise 'output'
         project = QgsProject.instance()
-        project_name = project.title() if project else ''
+        project_name = ''
+        if project:
+            title = project.title()
+            if isinstance(title, str) and title.strip():
+                project_name = title
+            else:
+                base = project.baseName()
+                if isinstance(base, str) and base.strip():
+                    project_name = base
         if not project_name:
             base_name = 'output'
         else:

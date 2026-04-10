@@ -817,9 +817,13 @@ class SMPGenerator:
 
     def _project_title_or_default(self):
         """Return the current project title or the legacy default style name."""
-        title = QgsProject.instance().title()
+        project = QgsProject.instance()
+        title = project.title()
         if isinstance(title, str) and title.strip():
             return title
+        base_name = project.baseName()
+        if isinstance(base_name, str) and base_name.strip():
+            return base_name
         return "QGIS MAP"
 
     def _create_style_from_canvas(self, extent, min_zoom, max_zoom, tile_format=None,
