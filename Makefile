@@ -261,3 +261,13 @@ pep8:
 	@echo "-----------"
 	@echo "Ignored in PEP8 check:"
 	@echo $(PEP8EXCLUDE)
+
+# Run flake8 style checking
+# http://pypi.python.org/pypi/flake8
+flake8:
+	@echo
+	@echo "-----------"
+	@echo "Flake8 check"
+	@echo "-----------"
+	@flake8 --count --show-source --statistics . || true
+	@echo "-----------"
