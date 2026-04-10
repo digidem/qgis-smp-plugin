@@ -24,7 +24,7 @@ from qgis.core import (
     QgsMapRendererCustomPainterJob
 )
 from qgis.PyQt.QtCore import QSize
-from qgis.PyQt.QtGui import QImage, QPainter
+from qgis.PyQt.QtGui import QImage, QPainter, QImageWriter
 
 # Warn if estimated tile count exceeds this threshold
 TILE_COUNT_WARNING_THRESHOLD = 5000
@@ -178,6 +178,7 @@ class SMPGenerator:
     TILE_FORMAT_PNG = 'PNG'
     TILE_FORMAT_JPG = 'JPG'
     TILE_FORMAT_WEBP = 'WEBP'
+    _VALID_TILE_FORMATS = {TILE_FORMAT_PNG, TILE_FORMAT_JPG, TILE_FORMAT_WEBP}
 
     @staticmethod
     def _tile_extension(tile_format):
@@ -198,6 +199,37 @@ class SMPGenerator:
         if fmt == 'WEBP':
             return 'WEBP'
         return 'PNG'
+
+    @classmethod
+    def is_tile_format_supported(cls, tile_format):
+        """Return True when the runtime can encode the requested output format."""
+        fmt = cls.TILE_FORMAT_PNG if tile_format is None else tile_format.upper()
+        if fmt not in cls._VALID_TILE_FORMATS:
+            return False
+        supported_formats = {
+            bytes(writer_format).decode('ascii', errors='ignore').upper()
+            for writer_format in QImageWriter.supportedImageFormats()
+        }
+        acceptable_qt_formats = {
+            cls.TILE_FORMAT_PNG: {'PNG'},
+            cls.TILE_FORMAT_JPG: {'JPG', 'JPEG'},
+            cls.TILE_FORMAT_WEBP: {'WEBP'},
+        }
+        return bool(acceptable_qt_formats[fmt].intersection(supported_formats))
+
+    @classmethod
+    def validate_tile_format(cls, tile_format):
+        """Normalize and validate a requested tile output format."""
+        fmt = cls.TILE_FORMAT_PNG if tile_format is None else tile_format.upper()
+        if fmt not in cls._VALID_TILE_FORMATS:
+            raise ValueError(
+                f"Unsupported tile format: {fmt}. Use 'PNG', 'JPG', or 'WEBP'."
+            )
+        if not cls.is_tile_format_supported(fmt):
+            raise ValueError(
+                f"Tile format {fmt} is not supported for output by this runtime."
+            )
+        return fmt
 
     # QGIS rendering (QgsMapRendererCustomPainterJob) is not safe to call
     # concurrently from multiple threads.  This lock serialises all
@@ -327,6 +359,63 @@ class SMPGenerator:
             'total_tiles': total_tiles,
         }
 
+    @staticmethod
+    def _merged_interval_length(intervals):
+        """Return the total length covered by half-open intervals."""
+        if not intervals:
+            return 0
+
+        sorted_intervals = sorted(intervals)
+        total = 0
+        start, end = sorted_intervals[0]
+        for current_start, current_end in sorted_intervals[1:]:
+            if current_start <= end:
+                end = max(end, current_end)
+            else:
+                total += end - start
+                start, end = current_start, current_end
+        total += end - start
+        return total
+
+    @classmethod
+    def _count_unique_tiles_in_ranges(cls, tile_ranges):
+        """Return the number of unique tiles represented by 7-tuple ranges."""
+        ranges_by_zoom = {}
+        for zoom, min_x, max_x, min_y, max_y, _, _ in tile_ranges:
+            ranges_by_zoom.setdefault(zoom, []).append(
+                (min_x, max_x + 1, min_y, max_y + 1)
+            )
+
+        total = 0
+        for rects in ranges_by_zoom.values():
+            events = []
+            for min_x, max_x, min_y, max_y in rects:
+                events.append((min_x, 1, min_y, max_y))
+                events.append((max_x, -1, min_y, max_y))
+            events.sort(key=lambda event: event[0])
+
+            active_intervals = {}
+            previous_x = None
+            index = 0
+            while index < len(events):
+                current_x = events[index][0]
+                if previous_x is not None and current_x > previous_x and active_intervals:
+                    covered_y = cls._merged_interval_length(list(active_intervals.keys()))
+                    total += (current_x - previous_x) * covered_y
+
+                while index < len(events) and events[index][0] == current_x:
+                    _, delta, min_y, max_y = events[index]
+                    key = (min_y, max_y)
+                    next_count = active_intervals.get(key, 0) + delta
+                    if next_count > 0:
+                        active_intervals[key] = next_count
+                    else:
+                        active_intervals.pop(key, None)
+                    index += 1
+                previous_x = current_x
+
+        return total
+
     def _build_export_plan(self, extent, min_zoom, max_zoom,
                            include_world_base_zooms=False, world_max_zoom=3):
         """Return a normalized export plan shared by estimates, rendering, and packaging."""
@@ -366,13 +455,19 @@ class SMPGenerator:
             z for src in sources for z in src['export_zooms']
         ))
 
+        if include_world_base_zooms and sources:
+            world_coverage_tiles = self._count_unique_tiles_in_ranges(tiles_by_zoom)
+        else:
+            world_coverage_tiles = total_tiles
+
         world_tiles = sum(4 ** zoom for zoom in export_zooms)
         return {
             'export_zooms': export_zooms,
             'tiles_by_zoom': tiles_by_zoom,
             'total_tiles': total_tiles,
+            'world_coverage_tiles': world_coverage_tiles,
             'world_tiles': world_tiles,
-            'world_pct': (total_tiles / world_tiles) * 100 if world_tiles else 0,
+            'world_pct': (world_coverage_tiles / world_tiles) * 100 if world_tiles else 0,
             'source_bounds': (
                 list(WORLD_BOUNDS_WGS84)
                 if include_world_base_zooms
@@ -429,7 +524,7 @@ class SMPGenerator:
     def estimate_world_pyramid_percentage(self, extent, min_zoom, max_zoom,
                                           include_world_base_zooms=False,
                                           world_max_zoom=3):
-        """Return percentage of full-world pyramid represented by export tiles."""
+        """Return unique export coverage and full-world pyramid totals."""
         plan = self._build_export_plan(
             extent,
             min_zoom,
@@ -437,7 +532,7 @@ class SMPGenerator:
             include_world_base_zooms=include_world_base_zooms,
             world_max_zoom=world_max_zoom
         )
-        return plan['total_tiles'], plan['world_tiles'], plan['world_pct']
+        return plan['world_coverage_tiles'], plan['world_tiles'], plan['world_pct']
 
     def estimate_tile_count(self, extent, min_zoom, max_zoom,
                             include_world_base_zooms=False, world_max_zoom=3):
@@ -601,9 +696,7 @@ class SMPGenerator:
         if tile_format is None:
             tile_format = self.TILE_FORMAT_PNG
 
-        tile_format = tile_format.upper()
-        if tile_format not in (self.TILE_FORMAT_PNG, self.TILE_FORMAT_JPG, self.TILE_FORMAT_WEBP):
-            raise ValueError(f"Unsupported tile format: {tile_format}. Use 'PNG', 'JPG', or 'WEBP'.")
+        tile_format = self.validate_tile_format(tile_format)
 
         jpeg_quality = max(1, min(100, int(jpeg_quality)))
 

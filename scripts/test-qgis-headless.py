@@ -121,12 +121,96 @@ try:
     check("WebP format field", src_webp['format'] == 'webp')
     check("WebP tile extension", '.webp' in src_webp['tiles'][0])
 
-    style_world = gen._create_style_from_canvas(
-        extent, 6, 12, 'PNG', include_world_base_zooms=True, world_max_zoom=3
+    world_plan = gen._build_export_plan(
+        extent, 6, 12,
+        include_world_base_zooms=True, world_max_zoom=3
     )
-    src_world = list(style_world['sources'].values())[0]
-    check("World base: minzoom=0", src_world['minzoom'] == 0)
-    check("World base: world bounds", src_world['bounds'] == [-180.0, -85.0511, 180.0, 85.0511])
+    style_world = gen._create_style_from_canvas(
+        extent, 6, 12, 'PNG',
+        include_world_base_zooms=True, world_max_zoom=3,
+        source_bounds=world_plan['source_bounds'],
+        source_plans=world_plan['sources']
+    )
+    world_sources = style_world['sources']
+    check("World style uses two sources",
+          set(world_sources.keys()) == {'world-overview', 'region-detail'},
+          "got {}".format(list(world_sources.keys())))
+    check("World overview folder = s/0",
+          style_world['metadata']['smp:sourceFolders'].get('world-overview') == 's/0')
+    check("Region detail folder = s/1",
+          style_world['metadata']['smp:sourceFolders'].get('region-detail') == 's/1')
+    check("World overview tile path uses s/0 PNG",
+          world_sources['world-overview']['tiles'][0].endswith('s/0/{z}/{x}/{y}.png'))
+    check("Region detail tile path uses s/1 PNG",
+          world_sources['region-detail']['tiles'][0].endswith('s/1/{z}/{x}/{y}.png'))
+    check("World layer order is world then region",
+          [layer['id'] for layer in style_world['layers'][1:3]] == ['world-raster', 'region-raster'])
+    check("World style bounds follow region extent",
+          style_world['metadata']['smp:bounds'] == world_plan['sources'][1]['source_bounds'])
+
+    # ------------------------------------------------------------------
+    print("\n--- Multi-Source Archive Roundtrip ---")
+
+    roundtrip_plan = gen._build_export_plan(
+        extent, 3, 3,
+        include_world_base_zooms=True, world_max_zoom=3
+    )
+    out_roundtrip = os.path.join(tmp, 'world-roundtrip.smp')
+    roundtrip_result = gen.generate_smp_from_canvas(
+        extent, 3, 3, out_roundtrip,
+        tile_format='PNG',
+        include_world_base_zooms=True,
+        world_max_zoom=3,
+        export_plan=roundtrip_plan
+    )
+    check("PNG roundtrip archive created",
+          roundtrip_result == out_roundtrip and os.path.exists(out_roundtrip))
+
+    with zipfile.ZipFile(out_roundtrip) as zf:
+        roundtrip_names = set(zf.namelist())
+        roundtrip_style = json.loads(zf.read('style.json'))
+
+    roundtrip_s0 = [
+        n for n in roundtrip_names if n.startswith('s/0/') and n.endswith('.png')
+    ]
+    roundtrip_s1 = [
+        n for n in roundtrip_names if n.startswith('s/1/') and n.endswith('.png')
+    ]
+    roundtrip_world = roundtrip_style['sources']['world-overview']
+    roundtrip_region = roundtrip_style['sources']['region-detail']
+    check("Roundtrip style has two sources", len(roundtrip_style['sources']) == 2)
+    check("Roundtrip style includes world-overview",
+          'world-overview' in roundtrip_style['sources'])
+    check("Roundtrip style includes region-detail",
+          'region-detail' in roundtrip_style['sources'])
+    check("Roundtrip archive has expected world tile count",
+          len(roundtrip_s0) == roundtrip_plan['sources'][0]['total_tiles'],
+          "found {} expected {}".format(
+              len(roundtrip_s0), roundtrip_plan['sources'][0]['total_tiles']))
+    check("Roundtrip archive has expected region tile count",
+          len(roundtrip_s1) == roundtrip_plan['sources'][1]['total_tiles'],
+          "found {} expected {}".format(
+              len(roundtrip_s1), roundtrip_plan['sources'][1]['total_tiles']))
+    check("Roundtrip world source zooms match plan",
+          roundtrip_world['minzoom'] == roundtrip_plan['sources'][0]['export_zooms'][0] and
+          roundtrip_world['maxzoom'] == roundtrip_plan['sources'][0]['export_zooms'][-1])
+    check("Roundtrip region source zooms match plan",
+          roundtrip_region['minzoom'] == roundtrip_plan['sources'][1]['export_zooms'][0] and
+          roundtrip_region['maxzoom'] == roundtrip_plan['sources'][1]['export_zooms'][-1])
+    check("Roundtrip bounds follow region extent",
+          roundtrip_style['metadata']['smp:bounds'] == roundtrip_plan['sources'][1]['source_bounds'])
+    check("Roundtrip sourceFolders match archive layout",
+          roundtrip_style['metadata']['smp:sourceFolders'] == {
+              'world-overview': 's/0',
+              'region-detail': 's/1'
+          },
+          "got {}".format(roundtrip_style['metadata'].get('smp:sourceFolders')))
+    check("Roundtrip uses PNG sources only",
+          all(src['format'] == 'png' and src['tiles'][0].endswith('.png')
+              for src in roundtrip_style['sources'].values()),
+          "formats={}".format([
+              src['format'] for src in roundtrip_style['sources'].values()
+          ]))
 
     # ------------------------------------------------------------------
     print("\n--- Archive Build (Dedup) ---")

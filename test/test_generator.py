@@ -54,6 +54,9 @@ class _FakeProject:
             cls._instance = cls()
         return cls._instance
 
+    def title(self):
+        return ''
+
     def crs(self):
         return _FakeCrs()
 
@@ -105,6 +108,7 @@ qgis_core_mock.QgsMapRendererCustomPainterJob = MagicMock()
 
 pyqt_core_mock = MagicMock()
 pyqt_gui_mock = MagicMock()
+pyqt_gui_mock.QImageWriter.supportedImageFormats.return_value = [b'png', b'jpeg', b'webp']
 
 sys.modules['qgis'] = qgis_mock
 sys.modules['qgis.core'] = qgis_core_mock
@@ -534,6 +538,25 @@ class TestTileFormatConstants(unittest.TestCase):
             gen.generate_smp_from_canvas(
                 extent, 0, 1, '/tmp/test.smp', tile_format='BMP'
             )
+
+    def test_generate_smp_rejects_unsupported_webp_before_rendering(self):
+        """Explicit WEBP should fail fast when runtime encoding support is missing."""
+        gen = SMPGenerator()
+        gen.validate_disk_space = MagicMock()
+        gen._generate_tiles_from_canvas = MagicMock()
+
+        extent = _FakeRectangle(-1, -1, 1, 1)
+        with patch.object(SMPGenerator, 'is_tile_format_supported', return_value=False), \
+             patch('tempfile.mkdtemp') as mkdtemp:
+            with self.assertRaises(ValueError) as ctx:
+                gen.generate_smp_from_canvas(
+                    extent, 0, 1, '/tmp/test.smp', tile_format='WEBP'
+                )
+
+        self.assertIn('WEBP', str(ctx.exception))
+        gen.validate_disk_space.assert_not_called()
+        gen._generate_tiles_from_canvas.assert_not_called()
+        mkdtemp.assert_not_called()
 
     def test_jpeg_quality_clamped(self):
         """JPEG quality outside 1-100 should be clamped silently."""
@@ -1945,6 +1968,26 @@ class TestCheckParameterValues(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn('Insufficient disk space', msg)
 
+    def test_webp_rejected_during_preflight_when_runtime_unsupported(self):
+        """Processing preflight should reject explicit WEBP on unsupported runtimes."""
+        algo = self._make_algorithm()
+        algo.parameterAsExtent = MagicMock(return_value=self._make_extent(0, 0, 1, 1))
+        algo.parameterAsInt = MagicMock(side_effect=lambda p, k, c: 0 if k == 'MIN_ZOOM' else 5)
+        algo.parameterAsEnum = MagicMock(return_value=algo.TILE_FORMAT_OPTIONS.index('WEBP'))
+        algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
+        algo.parameterAsBool = MagicMock(return_value=False)
+
+        import comapeo_smp_generator as _gen_mod
+        with patch.object(_gen_mod.SMPGenerator, 'is_tile_format_supported', return_value=False), \
+             patch.object(_gen_mod.SMPGenerator, 'validate_tile_count') as validate_tile_count, \
+             patch.object(_gen_mod.SMPGenerator, 'validate_disk_space') as validate_disk_space:
+            ok, msg = algo.checkParameterValues({}, MagicMock())
+
+        self.assertFalse(ok)
+        self.assertIn('WEBP', msg)
+        validate_tile_count.assert_not_called()
+        validate_disk_space.assert_not_called()
+
     def test_process_algorithm_rejects_non_integer_enum_value(self):
         algo = self._make_algorithm()
         algo.parameterAsExtent = MagicMock(return_value=self._make_extent(0, 0, 1, 1))
@@ -1956,6 +1999,24 @@ class TestCheckParameterValues(unittest.TestCase):
         with self.assertRaises(Exception) as ctx:
             algo.processAlgorithm({}, MagicMock(), MagicMock())
         self.assertIn('Invalid tile format value', str(ctx.exception))
+
+    def test_process_algorithm_rejects_unsupported_webp_when_runtime_unsupported(self):
+        """Processing execution should reject explicit WEBP before generation starts."""
+        algo = self._make_algorithm()
+        algo.parameterAsExtent = MagicMock(return_value=self._make_extent(0, 0, 1, 1))
+        algo.parameterAsInt = MagicMock(side_effect=lambda p, k, c: 0 if k == 'MIN_ZOOM' else 5)
+        algo.parameterAsBool = MagicMock(return_value=False)
+        algo.parameterAsEnum = MagicMock(return_value=algo.TILE_FORMAT_OPTIONS.index('WEBP'))
+        algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
+
+        import comapeo_smp_generator as _gen_mod
+        with patch.object(_gen_mod.SMPGenerator, 'is_tile_format_supported', return_value=False), \
+             patch.object(_gen_mod.SMPGenerator, 'generate_smp_from_canvas') as generate_smp:
+            with self.assertRaises(Exception) as ctx:
+                algo.processAlgorithm({}, MagicMock(), MagicMock())
+
+        self.assertIn('WEBP', str(ctx.exception))
+        generate_smp.assert_not_called()
 
     def test_empty_extent_skips_generator(self):
         """An empty extent should not call the generator (return True to let processAlgorithm handle it)."""
@@ -1985,6 +2046,111 @@ class TestCheckParameterValues(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertIn('between 3 and 5', msg)
+
+    def test_default_tile_format_index_prefers_webp_when_supported(self):
+        """WEBP should remain the default when runtime encoding support exists."""
+        algo = self._make_algorithm()
+        generator_cls = algo.default_tile_format_index.__globals__['SMPGenerator']
+
+        with patch.object(generator_cls, 'is_tile_format_supported', return_value=True) as support_mock:
+            index = algo.default_tile_format_index()
+
+        self.assertEqual(index, algo.TILE_FORMAT_OPTIONS.index('WEBP'))
+        support_mock.assert_called_once_with(generator_cls.TILE_FORMAT_WEBP)
+
+    def test_default_tile_format_index_falls_back_to_jpg_when_webp_unsupported(self):
+        """JPG should become the default when WEBP encoding is unavailable."""
+        algo = self._make_algorithm()
+        generator_cls = algo.default_tile_format_index.__globals__['SMPGenerator']
+
+        with patch.object(generator_cls, 'is_tile_format_supported', side_effect=[False, True]) as support_mock:
+            index = algo.default_tile_format_index()
+
+        self.assertEqual(index, algo.TILE_FORMAT_OPTIONS.index('JPG'))
+        self.assertEqual(
+            support_mock.call_args_list,
+            [
+                ((generator_cls.TILE_FORMAT_WEBP,), {}),
+                ((generator_cls.TILE_FORMAT_JPG,), {}),
+            ]
+        )
+
+    def test_default_tile_format_index_falls_back_to_png_when_webp_and_jpg_unsupported(self):
+        """PNG should become the default when WEBP and JPG encoders are unavailable."""
+        algo = self._make_algorithm()
+        generator_cls = algo.default_tile_format_index.__globals__['SMPGenerator']
+
+        with patch.object(generator_cls, 'is_tile_format_supported', side_effect=[False, False, True]) as support_mock:
+            index = algo.default_tile_format_index()
+
+        self.assertEqual(index, algo.TILE_FORMAT_OPTIONS.index('PNG'))
+        self.assertEqual(
+            support_mock.call_args_list,
+            [
+                ((generator_cls.TILE_FORMAT_WEBP,), {}),
+                ((generator_cls.TILE_FORMAT_JPG,), {}),
+                ((generator_cls.TILE_FORMAT_PNG,), {}),
+            ]
+        )
+
+    def test_init_algorithm_uses_capability_aware_tile_format_default(self):
+        """Processing enum default should come from the capability-aware helper."""
+        algo = self._make_algorithm()
+        algo.addParameter = MagicMock()
+        algo.default_tile_format_index = MagicMock(return_value=1)
+        enum_ctor = algo.initAlgorithm.__globals__['QgsProcessingParameterEnum']
+        enum_ctor.reset_mock()
+
+        algo.initAlgorithm(None)
+
+        tile_format_calls = [
+            call for call in enum_ctor.call_args_list
+            if call.args and call.args[0] == algo.TILE_FORMAT
+        ]
+        self.assertEqual(len(tile_format_calls), 1)
+        self.assertEqual(tile_format_calls[0].kwargs['defaultValue'], 1)
+        algo.default_tile_format_index.assert_called_once_with()
+
+    def test_process_algorithm_logs_world_coverage_with_corrected_numerator(self):
+        """Processing feedback must display world_coverage_tiles, not total_tiles."""
+        algo = self._make_algorithm()
+        extent = self._make_extent(0, 0, 1, 1)
+        int_values = {
+            algo.MIN_ZOOM: 2,
+            algo.MAX_ZOOM: 5,
+            algo.WORLD_MAX_ZOOM: 3,
+            algo.JPEG_QUALITY: 85,
+        }
+        algo.parameterAsExtent = MagicMock(return_value=extent)
+        algo.parameterAsInt = MagicMock(side_effect=lambda _p, key, _c: int_values[key])
+        algo.parameterAsBool = MagicMock(return_value=True)
+        algo.parameterAsEnum = MagicMock(return_value=algo.TILE_FORMAT_OPTIONS.index('PNG'))
+        algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
+
+        feedback = MagicMock()
+        export_plan = {
+            'total_tiles': 200,
+            'world_coverage_tiles': 85,
+            'world_tiles': 1365,
+            'world_pct': (85 / 1365) * 100,
+            'source_bounds': [-180.0, -85.0511, 180.0, 85.0511],
+            'sources': [],
+        }
+
+        import comapeo_smp_generator as _gen_mod
+        with patch.object(_gen_mod.SMPGenerator, '_build_export_plan', return_value=export_plan), \
+             patch.object(_gen_mod.SMPGenerator, 'estimate_tile_storage_bytes', return_value=1024 * 1024), \
+             patch.object(_gen_mod.SMPGenerator, 'generate_smp_from_canvas', return_value='/tmp/test.smp'):
+            result = algo.processAlgorithm({}, MagicMock(), feedback)
+
+        self.assertEqual(result, {algo.OUTPUT_FILE: '/tmp/test.smp'})
+        pushed_messages = [call.args[0] for call in feedback.pushInfo.call_args_list]
+        coverage_message = next(
+            msg for msg in pushed_messages
+            if msg.startswith('Estimated world pyramid coverage:')
+        )
+        self.assertIn('(85/1,365 tiles)', coverage_message)
+        self.assertNotIn('(200/1,365 tiles)', coverage_message)
 
 
 class TestPluginLifecycle(unittest.TestCase):
@@ -2319,27 +2485,91 @@ class TestWebPFormatSupport(unittest.TestCase):
         source = list(style['sources'].values())[0]
         self.assertEqual(source['format'], 'webp')
 
-    def test_webp_accepted_by_generate_smp(self):
-        """generate_smp_from_canvas must accept 'WEBP' without raising ValueError."""
+    def test_generate_smp_accepts_webp_when_runtime_supports_it(self):
+        """WEBP generation should proceed when the runtime explicitly reports WEBP support."""
         gen = SMPGenerator()
-        gen.validate_tile_count = MagicMock(return_value=(1, None))
+        gen._build_export_plan = MagicMock(return_value={
+            'total_tiles': 1,
+            'world_pct': 100,
+            'source_bounds': [-1, -1, 1, 1],
+            'sources': []
+        })
         gen.validate_extent_size = MagicMock(return_value=None)
         gen.validate_disk_space = MagicMock()
         gen._create_style_from_canvas = MagicMock(return_value={"version": 8})
         gen._generate_tiles_from_canvas = MagicMock()
-        gen._build_smp_archive = MagicMock()
-        gen._get_bounds_wgs84 = MagicMock(return_value=[-1, -1, 1, 1])
+        gen._build_smp_archive = MagicMock(return_value=True)
 
         tmp = tempfile.mkdtemp()
         try:
             out = os.path.join(tmp, 'test.smp')
             extent = _FakeRectangle(-1, -1, 1, 1)
-            gen.generate_smp_from_canvas(
-                extent, 0, 1, out, tile_format='WEBP'
-            )
+            with patch('comapeo_smp_generator.QImageWriter.supportedImageFormats',
+                       return_value=[b'png', b'jpeg', b'webp']):
+                result = gen.generate_smp_from_canvas(
+                    extent, 0, 1, out, tile_format='WEBP'
+                )
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
-        # If we get here without ValueError, the test passes
+
+        self.assertEqual(result, out)
+        gen._build_export_plan.assert_called_once()
+        gen._create_style_from_canvas.assert_called_once()
+        gen._generate_tiles_from_canvas.assert_called_once()
+
+    def test_is_tile_format_supported_uses_qt_encoder_capabilities(self):
+        """Runtime output support should come from Qt encoder capabilities."""
+        with patch('comapeo_smp_generator.QImageWriter.supportedImageFormats',
+                   return_value=[b'png', b'jpeg']):
+            self.assertTrue(SMPGenerator.is_tile_format_supported('PNG'))
+            self.assertTrue(SMPGenerator.is_tile_format_supported('JPG'))
+            self.assertFalse(SMPGenerator.is_tile_format_supported('WEBP'))
+            self.assertFalse(SMPGenerator.is_tile_format_supported('GIF'))
+
+    def test_is_tile_format_supported_accepts_jpg_alias(self):
+        """JPEG support detection should accept Qt runtimes that report 'jpg'."""
+        with patch('comapeo_smp_generator.QImageWriter.supportedImageFormats',
+                   return_value=[b'png', b'jpg']):
+            self.assertTrue(SMPGenerator.is_tile_format_supported('JPG'))
+
+    def test_validate_tile_format_rejects_empty_string(self):
+        """Empty-string direct caller input should remain invalid."""
+        with self.assertRaisesRegex(ValueError, 'Unsupported tile format'):
+            SMPGenerator.validate_tile_format('')
+
+    def test_generate_smp_rejects_unsupported_webp_before_rendering(self):
+        """Unsupported runtime WEBP output should fail during startup validation."""
+        gen = SMPGenerator()
+        gen._build_export_plan = MagicMock(return_value={
+            'total_tiles': 1,
+            'world_pct': 100,
+            'source_bounds': [-1, -1, 1, 1],
+            'sources': []
+        })
+        gen.validate_extent_size = MagicMock(return_value=None)
+        gen.validate_disk_space = MagicMock()
+        gen._create_style_from_canvas = MagicMock()
+        gen._generate_tiles_from_canvas = MagicMock()
+
+        tmp = tempfile.mkdtemp()
+        try:
+            out = os.path.join(tmp, 'test.smp')
+            extent = _FakeRectangle(-1, -1, 1, 1)
+            with patch('comapeo_smp_generator.QImageWriter.supportedImageFormats',
+                       return_value=[b'png', b'jpeg']):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    'Tile format WEBP is not supported for output by this runtime.'
+                ):
+                    gen.generate_smp_from_canvas(
+                        extent, 0, 1, out, tile_format='WEBP'
+                    )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        gen._build_export_plan.assert_not_called()
+        gen._create_style_from_canvas.assert_not_called()
+        gen._generate_tiles_from_canvas.assert_not_called()
 
     def test_webp_tile_paths_in_manifest(self):
         """_tile_paths_from_source_plans must produce .webp extensions for WEBP format."""
@@ -3271,6 +3501,15 @@ class TestMultiSourceExportPlan(unittest.TestCase):
         self.user_extent = _FakeRectangle(-1, -1, 1, 1)
         self.gen.get_world_extent = lambda: self.world_extent
 
+    @staticmethod
+    def _count_unique_tiles(plan):
+        covered = set()
+        for zoom, min_x, max_x, min_y, max_y, _, _ in plan['tiles_by_zoom']:
+            for x in range(min_x, max_x + 1):
+                for y in range(min_y, max_y + 1):
+                    covered.add((zoom, x, y))
+        return len(covered)
+
     def test_world_disabled_has_single_source(self):
         plan = self.gen._build_export_plan(
             self.user_extent, 5, 10,
@@ -3300,14 +3539,14 @@ class TestMultiSourceExportPlan(unittest.TestCase):
         self.assertEqual(world_source['export_zooms'][0], 0)
         self.assertEqual(world_source['export_zooms'][-1], 3)
 
-    def test_world_source_max_zoom_floored_at_2(self):
-        """When world_max_zoom < 2, the world source should still go up to zoom 2."""
+    def test_world_source_max_zoom_supports_upper_bound_5(self):
+        """World source should include the full supported user-facing range up to zoom 5."""
         plan = self.gen._build_export_plan(
             self.user_extent, 5, 10,
-            include_world_base_zooms=True, world_max_zoom=1
+            include_world_base_zooms=True, world_max_zoom=5
         )
         world_source = plan['sources'][0]
-        self.assertEqual(world_source['export_zooms'][-1], 2)
+        self.assertEqual(world_source['export_zooms'][-1], 5)
 
     def test_region_source_zooms_match_user_range(self):
         plan = self.gen._build_export_plan(
@@ -3343,6 +3582,31 @@ class TestMultiSourceExportPlan(unittest.TestCase):
         source_total = sum(s['total_tiles'] for s in plan['sources'])
         self.assertEqual(plan['total_tiles'], source_total)
 
+    def test_world_coverage_tiles_matches_unique_export_tiles_when_enabled(self):
+        """world_coverage_tiles should count unique exported tiles across all sources."""
+        plan = self.gen._build_export_plan(
+            self.user_extent, 5, 10,
+            include_world_base_zooms=True, world_max_zoom=3
+        )
+        unique_tiles = self._count_unique_tiles(plan)
+        self.assertEqual(plan['world_coverage_tiles'], unique_tiles)
+        self.assertEqual(plan['world_coverage_tiles'], plan['total_tiles'])
+        self.assertGreater(plan['world_coverage_tiles'], plan['sources'][0]['total_tiles'])
+
+    def test_estimate_world_pyramid_percentage_returns_world_coverage_tiles(self):
+        """estimate_world_pyramid_percentage should expose the dedicated numerator."""
+        covered_tiles, world_tiles, world_pct = self.gen.estimate_world_pyramid_percentage(
+            self.user_extent, 5, 10,
+            include_world_base_zooms=True, world_max_zoom=3
+        )
+        plan = self.gen._build_export_plan(
+            self.user_extent, 5, 10,
+            include_world_base_zooms=True, world_max_zoom=3
+        )
+        self.assertEqual(covered_tiles, plan['world_coverage_tiles'])
+        self.assertEqual(world_tiles, plan['world_tiles'])
+        self.assertAlmostEqual(world_pct, plan['world_pct'], places=5)
+
     def test_world_tiles_backward_compat(self):
         """world_tiles must remain sum(4**z for z in export_zooms)."""
         plan = self.gen._build_export_plan(
@@ -3354,13 +3618,13 @@ class TestMultiSourceExportPlan(unittest.TestCase):
         self.assertEqual(plan['world_tiles'], expected_world_tiles)
 
     def test_world_pct_backward_compat(self):
-        """world_pct must equal (total_tiles / world_tiles) * 100."""
+        """world_pct must equal (world_coverage_tiles / world_tiles) * 100."""
         plan = self.gen._build_export_plan(
             self.user_extent, 5, 10,
             include_world_base_zooms=True, world_max_zoom=3
         )
         if plan['world_tiles'] > 0:
-            expected_pct = (plan['total_tiles'] / plan['world_tiles']) * 100
+            expected_pct = (plan['world_coverage_tiles'] / plan['world_tiles']) * 100
             self.assertAlmostEqual(plan['world_pct'], expected_pct, places=5)
 
     def test_world_disabled_backward_compat(self):
@@ -3371,6 +3635,7 @@ class TestMultiSourceExportPlan(unittest.TestCase):
         )
         self.assertEqual(len(plan['sources']), 1)
         self.assertEqual(plan['sources'][0]['source_id'], 'mbtiles-source')
+        self.assertEqual(plan['world_coverage_tiles'], plan['total_tiles'])
         # tiles_by_zoom should all have source_index=0
         for t in plan['tiles_by_zoom']:
             self.assertEqual(t[6], 0)
@@ -3394,8 +3659,52 @@ class TestMultiSourceExportPlan(unittest.TestCase):
             include_world_base_zooms=False
         )
         if plan['world_tiles'] > 0:
-            expected_pct = (plan['total_tiles'] / plan['world_tiles']) * 100
+            expected_pct = (plan['world_coverage_tiles'] / plan['world_tiles']) * 100
             self.assertAlmostEqual(plan['world_pct'], expected_pct, places=5)
+
+    def test_world_coverage_overlap_adds_region_only_tiles_without_double_counting(self):
+        """Overlap should include unique high-zoom region tiles without counting duplicated low zooms twice."""
+        plan = self.gen._build_export_plan(
+            self.user_extent, 2, 5,
+            include_world_base_zooms=True, world_max_zoom=3
+        )
+        unique_tiles = self._count_unique_tiles(plan)
+
+        self.assertEqual(plan['export_zooms'], [0, 1, 2, 3, 4, 5])
+        self.assertEqual(unique_tiles, 93)
+        self.assertEqual(plan['world_coverage_tiles'], unique_tiles)
+        self.assertGreater(plan['world_coverage_tiles'], plan['sources'][0]['total_tiles'])
+        self.assertLess(plan['world_coverage_tiles'], plan['total_tiles'])
+        self.assertEqual(plan['world_tiles'], 1365)
+        self.assertAlmostEqual(plan['world_pct'], (93 / 1365) * 100, places=5)
+
+    def test_world_coverage_gap_includes_region_only_tiles(self):
+        """A zoom gap should still count region-only high zoom tiles toward world coverage."""
+        plan = self.gen._build_export_plan(
+            self.user_extent, 6, 7,
+            include_world_base_zooms=True, world_max_zoom=3
+        )
+        unique_tiles = self._count_unique_tiles(plan)
+
+        self.assertEqual(plan['export_zooms'], [0, 1, 2, 3, 6, 7])
+        self.assertEqual(unique_tiles, 93)
+        self.assertEqual(plan['world_coverage_tiles'], unique_tiles)
+        self.assertEqual(plan['world_coverage_tiles'], plan['total_tiles'])
+        self.assertEqual(plan['world_tiles'], 20565)
+        self.assertAlmostEqual(plan['world_pct'], (93 / 20565) * 100, places=5)
+
+    def test_world_disabled_single_source_coverage_uses_total_tiles(self):
+        """Single-source exports must keep world coverage equal to the export total."""
+        plan = self.gen._build_export_plan(
+            self.world_extent, 0, 3,
+            include_world_base_zooms=False
+        )
+
+        self.assertEqual(plan['export_zooms'], [0, 1, 2, 3])
+        self.assertEqual(plan['total_tiles'], 85)
+        self.assertEqual(plan['world_coverage_tiles'], 85)
+        self.assertEqual(plan['world_tiles'], 85)
+        self.assertEqual(plan['world_pct'], 100.0)
 
 
 class TestMultiSourceStyleJson(unittest.TestCase):
@@ -4173,7 +4482,7 @@ class TestSMPRoundtripMultiSource(unittest.TestCase):
         ]
         plan = gen._build_export_plan(
             _FakeRectangle(-1, -1, 1, 1), 0, 2,
-            include_world_base_zooms=True, world_max_zoom=1
+            include_world_base_zooms=True, world_max_zoom=3
         )
 
         world_plan = plan['sources'][0]
@@ -4196,7 +4505,7 @@ class TestSMPRoundtripMultiSource(unittest.TestCase):
             "sources": {
                 "world-overview": {
                     "type": "raster", "format": "png",
-                    "minzoom": 0, "maxzoom": 1,
+                    "minzoom": 0, "maxzoom": 3,
                     "bounds": [-180, -85.0511, 180, 85.0511],
                     "tiles": ["smp://maps.v1/s/0/{z}/{x}/{y}.png"]
                 },
@@ -4393,11 +4702,11 @@ class TestCancellationMidSource(unittest.TestCase):
             # Build an export plan with 2 sources (world enabled)
             plan = self.gen._build_export_plan(
                 _FakeRectangle(-1, -1, 1, 1), 0, 2,
-                include_world_base_zooms=True, world_max_zoom=1
+                include_world_base_zooms=True, world_max_zoom=3
             )
             self.assertEqual(len(plan['sources']), 2)
 
-            # Source 0 tiles (world, zooms 0-1)
+            # Source 0 tiles (world, zooms 0-3)
             world_tiles = [t for t in plan['tiles_by_zoom'] if t[6] == 0]
             # Source 1 tiles (region, zooms 0-2)
             region_tiles = [t for t in plan['tiles_by_zoom'] if t[6] == 1]
