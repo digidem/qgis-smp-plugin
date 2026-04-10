@@ -54,6 +54,12 @@ class _FakeProject:
             cls._instance = cls()
         return cls._instance
 
+    def title(self):
+        return ''
+
+    def baseName(self):
+        return ''
+
     def crs(self):
         return _FakeCrs()
 
@@ -105,6 +111,7 @@ qgis_core_mock.QgsMapRendererCustomPainterJob = MagicMock()
 
 pyqt_core_mock = MagicMock()
 pyqt_gui_mock = MagicMock()
+pyqt_gui_mock.QImageWriter.supportedImageFormats.return_value = [b'png', b'jpeg', b'webp']
 
 sys.modules['qgis'] = qgis_mock
 sys.modules['qgis.core'] = qgis_core_mock
@@ -296,10 +303,12 @@ class TestWorldBaseZooms(unittest.TestCase):
             include_world_base_zooms=True,
             world_max_zoom=3
         )
+        # World source covers full world at zooms 0-3
+        # Region source covers user extent at zooms 0-5
         expected = (
             self.gen.estimate_world_tile_count(0, 3)
             + self.gen.estimate_mixed_tile_count(
-                self.user_extent, 4, 5, include_world_base_zooms=False
+                self.user_extent, 0, 5, include_world_base_zooms=False
             )
         )
         self.assertEqual(mixed_count, expected)
@@ -532,6 +541,25 @@ class TestTileFormatConstants(unittest.TestCase):
             gen.generate_smp_from_canvas(
                 extent, 0, 1, '/tmp/test.smp', tile_format='BMP'
             )
+
+    def test_generate_smp_rejects_unsupported_webp_before_rendering(self):
+        """Explicit WEBP should fail fast when runtime encoding support is missing."""
+        gen = SMPGenerator()
+        gen.validate_disk_space = MagicMock()
+        gen._generate_tiles_from_canvas = MagicMock()
+
+        extent = _FakeRectangle(-1, -1, 1, 1)
+        with patch.object(SMPGenerator, 'is_tile_format_supported', return_value=False), \
+             patch('tempfile.mkdtemp') as mkdtemp:
+            with self.assertRaises(ValueError) as ctx:
+                gen.generate_smp_from_canvas(
+                    extent, 0, 1, '/tmp/test.smp', tile_format='WEBP'
+                )
+
+        self.assertIn('WEBP', str(ctx.exception))
+        gen.validate_disk_space.assert_not_called()
+        gen._generate_tiles_from_canvas.assert_not_called()
+        mkdtemp.assert_not_called()
 
     def test_jpeg_quality_clamped(self):
         """JPEG quality outside 1-100 should be clamped silently."""
@@ -853,8 +881,8 @@ class TestProgressSmoothing(unittest.TestCase):
             def __exit__(self, exc_type, exc, tb):
                 return False
 
-            def submit(self, fn, *args):
-                future = _FakeFuture(fn(*args))
+            def submit(self, fn, *args, **kwargs):
+                future = _FakeFuture(fn(*args, **kwargs))
                 self.pending.append(future)
                 self.max_pending = max(self.max_pending, len(self.pending))
                 return future
@@ -920,8 +948,8 @@ class TestProgressSmoothing(unittest.TestCase):
             def __exit__(self, exc_type, exc, tb):
                 return False
 
-            def submit(self, fn, *args):
-                future = _FakeFuture(fn(*args))
+            def submit(self, fn, *args, **kwargs):
+                future = _FakeFuture(fn(*args, **kwargs))
                 self.pending.append(future)
                 return future
 
@@ -1040,8 +1068,8 @@ class TestCacheDirectory(unittest.TestCase):
 
         tmp = tempfile.mkdtemp()
         try:
-            # Pre-create the tile file
-            zoom_dir = os.path.join(tmp, '0', '0')
+            # Pre-create the tile file at source_index=0 path
+            zoom_dir = os.path.join(tmp, '0', '0', '0')
             os.makedirs(zoom_dir, exist_ok=True)
             tile_path = os.path.join(zoom_dir, '0.png')
             with open(tile_path, 'wb') as f:
@@ -1171,8 +1199,8 @@ class TestCacheDirectory(unittest.TestCase):
         out_dir = tempfile.mkdtemp()
         try:
             import json
-            current_dir = os.path.join(cache, '0', '0')
-            stale_dir = os.path.join(cache, '1', '0')
+            current_dir = os.path.join(cache, '0', '0', '0')
+            stale_dir = os.path.join(cache, '0', '1', '0')
             os.makedirs(current_dir, exist_ok=True)
             os.makedirs(stale_dir, exist_ok=True)
             with open(os.path.join(current_dir, '0.png'), 'wb') as fh:
@@ -1180,7 +1208,7 @@ class TestCacheDirectory(unittest.TestCase):
             with open(os.path.join(stale_dir, '0.png'), 'wb') as fh:
                 fh.write(b'\x89PNG')
             with open(os.path.join(cache, TileCache.META_FILE), 'w') as fh:
-                json.dump({"0/0/0": "PNG:85:any"}, fh)
+                json.dump({"0/0/0/0": "PNG:85:any"}, fh)
 
             out_path = os.path.join(out_dir, 'manifest.smp')
             gen.generate_smp_from_canvas(
@@ -1213,17 +1241,27 @@ class TestCacheDirectory(unittest.TestCase):
         out_dir = tempfile.mkdtemp()
         try:
             import json
-            current_tiles = [(0, 0, 0), (1, 0, 0), (2, 0, 0), (3, 0, 0), (6, 0, 0), (7, 0, 0)]
+            # World source tiles (source_index=0): zooms 0-3
+            world_tiles = [(0, 0, 0), (1, 0, 0), (2, 0, 0), (3, 0, 0)]
+            # Region source tiles (source_index=1): zooms 6-7
+            region_tiles = [(6, 0, 0), (7, 0, 0)]
             stale_tiles = [(5, 0, 0)]
 
-            for zoom, x, y in current_tiles + stale_tiles:
-                tile_dir = os.path.join(cache, str(zoom), str(x))
+            for zoom, x, y in world_tiles + region_tiles + stale_tiles:
+                # World tiles go under source_index=0, region under source_index=1
+                src_idx = 0 if (zoom, x, y) in world_tiles else 1
+                tile_dir = os.path.join(cache, str(src_idx), str(zoom), str(x))
                 os.makedirs(tile_dir, exist_ok=True)
                 with open(os.path.join(tile_dir, f'{y}.png'), 'wb') as fh:
                     fh.write(b'\x89PNG')
 
             with open(os.path.join(cache, TileCache.META_FILE), 'w') as fh:
-                json.dump({f"{z}/{x}/{y}": "PNG:85:any" for z, x, y in current_tiles}, fh)
+                meta = {}
+                for z, x, y in world_tiles:
+                    meta[f"0/{z}/{x}/{y}"] = "PNG:85:any"
+                for z, x, y in region_tiles:
+                    meta[f"1/{z}/{x}/{y}"] = "PNG:85:any"
+                json.dump(meta, fh)
 
             out_path = os.path.join(out_dir, 'world-cache.smp')
             gen.generate_smp_from_canvas(
@@ -1240,9 +1278,12 @@ class TestCacheDirectory(unittest.TestCase):
             with zipfile.ZipFile(out_path) as zf:
                 names = set(zf.namelist())
 
-            for zoom, x, y in current_tiles:
+            for zoom, x, y in world_tiles:
                 self.assertIn(f's/0/{zoom}/{x}/{y}.png', names)
+            for zoom, x, y in region_tiles:
+                self.assertIn(f's/1/{zoom}/{x}/{y}.png', names)
             self.assertNotIn('s/0/5/0/0.png', names)
+            self.assertNotIn('s/1/5/0/0.png', names)
             self.assertNotIn(f's/0/{TileCache.META_FILE}', names)
         finally:
             shutil.rmtree(cache, ignore_errors=True)
@@ -1258,6 +1299,88 @@ class TestLowZoomStyleOutput(unittest.TestCase):
 
     def _make_extent(self):
         return _FakeRectangle(-10, -10, 10, 10)
+
+    def test_uses_non_empty_qgis_project_title_for_style_name(self):
+        fake_project = MagicMock()
+        fake_project.title.return_value = 'Community Atlas'
+
+        with patch('comapeo_smp_generator.QgsProject.instance', return_value=fake_project):
+            style = self.gen._create_style_from_canvas(self._make_extent(), 0, 2)
+
+        self.assertEqual(style['name'], 'Community Atlas')
+
+    def test_uses_non_empty_qgis_project_title_for_multi_source_style_name(self):
+        fake_project = MagicMock()
+        fake_project.title.return_value = 'Community Atlas'
+        source_plans = [
+            {
+                'source_id': 'world-source',
+                'source_index': 0,
+                'source_bounds': [-180, -85.0511, 180, 85.0511],
+                'export_zooms': [0, 1, 2],
+            },
+            {
+                'source_id': 'region-source',
+                'source_index': 1,
+                'source_bounds': [-10, -10, 10, 10],
+                'export_zooms': [3, 4, 5],
+            },
+        ]
+
+        with patch('comapeo_smp_generator.QgsProject.instance', return_value=fake_project):
+            style = self.gen._create_style_from_canvas(
+                self._make_extent(), 0, 5, source_plans=source_plans
+            )
+
+        self.assertEqual(style['name'], 'Community Atlas')
+
+    def test_falls_back_to_qgis_map_when_project_title_is_empty(self):
+        fake_project = MagicMock()
+        fake_project.title.return_value = '   '
+
+        with patch('comapeo_smp_generator.QgsProject.instance', return_value=fake_project):
+            style = self.gen._create_style_from_canvas(self._make_extent(), 0, 2)
+
+        self.assertEqual(style['name'], 'QGIS MAP')
+
+    def test_falls_back_to_qgis_map_when_project_title_is_none(self):
+        fake_project = MagicMock()
+        fake_project.title.return_value = None
+
+        with patch('comapeo_smp_generator.QgsProject.instance', return_value=fake_project):
+            style = self.gen._create_style_from_canvas(self._make_extent(), 0, 2)
+
+        self.assertEqual(style['name'], 'QGIS MAP')
+
+    def test_uses_project_filename_when_title_is_empty(self):
+        fake_project = MagicMock()
+        fake_project.title.return_value = ''
+        fake_project.baseName.return_value = 'my_project'
+
+        with patch('comapeo_smp_generator.QgsProject.instance', return_value=fake_project):
+            style = self.gen._create_style_from_canvas(self._make_extent(), 0, 2)
+
+        self.assertEqual(style['name'], 'my_project')
+
+    def test_title_takes_precedence_over_filename(self):
+        fake_project = MagicMock()
+        fake_project.title.return_value = 'My Title'
+        fake_project.baseName.return_value = 'my_project'
+
+        with patch('comapeo_smp_generator.QgsProject.instance', return_value=fake_project):
+            style = self.gen._create_style_from_canvas(self._make_extent(), 0, 2)
+
+        self.assertEqual(style['name'], 'My Title')
+
+    def test_falls_back_to_qgis_map_when_both_empty(self):
+        fake_project = MagicMock()
+        fake_project.title.return_value = ''
+        fake_project.baseName.return_value = ''
+
+        with patch('comapeo_smp_generator.QgsProject.instance', return_value=fake_project):
+            style = self.gen._create_style_from_canvas(self._make_extent(), 0, 2)
+
+        self.assertEqual(style['name'], 'QGIS MAP')
 
     def test_max_zoom_0_default_zoom_non_negative(self):
         style = self.gen._create_style_from_canvas(self._make_extent(), 0, 0)
@@ -1419,7 +1542,7 @@ class TestGenerateSmpCancellation(unittest.TestCase):
             out = os.path.join(tmp, 'test.smp')
 
             def fake_generate(_extent, _min_zoom, _max_zoom, tiles_dir, **_kwargs):
-                tile_dir = os.path.join(tiles_dir, '0', '0')
+                tile_dir = os.path.join(tiles_dir, '0', '0', '0')
                 os.makedirs(tile_dir, exist_ok=True)
                 with open(os.path.join(tile_dir, '0.png'), 'wb') as fh:
                     fh.write(b'\x89PNG')
@@ -1452,7 +1575,7 @@ class TestSMPArchiveExcludesCacheMetadata(unittest.TestCase):
             json.dump({"version": 8, "sources": {}, "layers": []}, f)
 
         tiles_dir = os.path.join(self.tmp, 'tiles')
-        tile_file_dir = os.path.join(tiles_dir, '0', '0')
+        tile_file_dir = os.path.join(tiles_dir, '0', '0', '0')
         os.makedirs(tile_file_dir, exist_ok=True)
 
         # Real tile
@@ -1463,7 +1586,7 @@ class TestSMPArchiveExcludesCacheMetadata(unittest.TestCase):
         from comapeo_smp_generator import TileCache
         with open(os.path.join(tiles_dir, TileCache.META_FILE), 'w') as f:
             import json
-            json.dump({"0/0/0": "PNG:85"}, f)
+            json.dump({"0/0/0/0": "PNG:85"}, f)
 
         out_path = os.path.join(self.tmp, 'output.smp')
         gen._build_smp_archive(style_path=style_path,
@@ -1484,7 +1607,7 @@ class TestSMPArchiveExcludesCacheMetadata(unittest.TestCase):
 
     def test_meta_file_excluded_with_tile_paths(self):
         import zipfile
-        tile_paths = {'0/0/0.png'}
+        tile_paths = {'0/0/0/0.png'}
         smp = self._build_archive_with_meta(tile_paths=tile_paths)
         with zipfile.ZipFile(smp) as zf:
             names = zf.namelist()
@@ -1503,7 +1626,7 @@ class TestSMPArchiveExcludesCacheMetadata(unittest.TestCase):
 
         tiles_dir = os.path.join(self.tmp, 'tiles2')
         for z, x, y in [(0, 0, 0), (1, 0, 0)]:
-            d = os.path.join(tiles_dir, str(z), str(x))
+            d = os.path.join(tiles_dir, '0', str(z), str(x))
             os.makedirs(d, exist_ok=True)
             with open(os.path.join(d, f'{y}.png'), 'wb') as f:
                 f.write(b'\x89PNG')
@@ -1513,7 +1636,7 @@ class TestSMPArchiveExcludesCacheMetadata(unittest.TestCase):
         gen._build_smp_archive(style_path=style_path,
                                tiles_dir=tiles_dir,
                                output_path=out_path,
-                               tile_paths={'0/0/0.png'})
+                               tile_paths={'0/0/0/0.png'})
 
         with zipfile.ZipFile(out_path) as zf:
             names = zf.namelist()
@@ -1522,7 +1645,7 @@ class TestSMPArchiveExcludesCacheMetadata(unittest.TestCase):
 
     def test_current_tiles_included_when_tile_paths_provided(self):
         import zipfile
-        smp = self._build_archive_with_meta(tile_paths={'0/0/0.png'})
+        smp = self._build_archive_with_meta(tile_paths={'0/0/0/0.png'})
         with zipfile.ZipFile(smp) as zf:
             names = zf.namelist()
         self.assertIn('s/0/0/0/0.png', names)
@@ -1599,7 +1722,7 @@ class TestTileCacheThreadSafety(unittest.TestCase):
             meta_path = os.path.join(tmp, TileCache.META_FILE)
             with open(meta_path) as fh:
                 data = json.load(fh)
-            self.assertEqual(len(data), 10)
+            self.assertEqual(len(data), 11)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1930,6 +2053,26 @@ class TestCheckParameterValues(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn('Insufficient disk space', msg)
 
+    def test_webp_rejected_during_preflight_when_runtime_unsupported(self):
+        """Processing preflight should reject explicit WEBP on unsupported runtimes."""
+        algo = self._make_algorithm()
+        algo.parameterAsExtent = MagicMock(return_value=self._make_extent(0, 0, 1, 1))
+        algo.parameterAsInt = MagicMock(side_effect=lambda p, k, c: 0 if k == 'MIN_ZOOM' else 5)
+        algo.parameterAsEnum = MagicMock(return_value=algo.TILE_FORMAT_OPTIONS.index('WEBP'))
+        algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
+        algo.parameterAsBool = MagicMock(return_value=False)
+
+        import comapeo_smp_generator as _gen_mod
+        with patch.object(_gen_mod.SMPGenerator, 'is_tile_format_supported', return_value=False), \
+             patch.object(_gen_mod.SMPGenerator, 'validate_tile_count') as validate_tile_count, \
+             patch.object(_gen_mod.SMPGenerator, 'validate_disk_space') as validate_disk_space:
+            ok, msg = algo.checkParameterValues({}, MagicMock())
+
+        self.assertFalse(ok)
+        self.assertIn('WEBP', msg)
+        validate_tile_count.assert_not_called()
+        validate_disk_space.assert_not_called()
+
     def test_process_algorithm_rejects_non_integer_enum_value(self):
         algo = self._make_algorithm()
         algo.parameterAsExtent = MagicMock(return_value=self._make_extent(0, 0, 1, 1))
@@ -1941,6 +2084,24 @@ class TestCheckParameterValues(unittest.TestCase):
         with self.assertRaises(Exception) as ctx:
             algo.processAlgorithm({}, MagicMock(), MagicMock())
         self.assertIn('Invalid tile format value', str(ctx.exception))
+
+    def test_process_algorithm_rejects_unsupported_webp_when_runtime_unsupported(self):
+        """Processing execution should reject explicit WEBP before generation starts."""
+        algo = self._make_algorithm()
+        algo.parameterAsExtent = MagicMock(return_value=self._make_extent(0, 0, 1, 1))
+        algo.parameterAsInt = MagicMock(side_effect=lambda p, k, c: 0 if k == 'MIN_ZOOM' else 5)
+        algo.parameterAsBool = MagicMock(return_value=False)
+        algo.parameterAsEnum = MagicMock(return_value=algo.TILE_FORMAT_OPTIONS.index('WEBP'))
+        algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
+
+        import comapeo_smp_generator as _gen_mod
+        with patch.object(_gen_mod.SMPGenerator, 'is_tile_format_supported', return_value=False), \
+             patch.object(_gen_mod.SMPGenerator, 'generate_smp_from_canvas') as generate_smp:
+            with self.assertRaises(Exception) as ctx:
+                algo.processAlgorithm({}, MagicMock(), MagicMock())
+
+        self.assertIn('WEBP', str(ctx.exception))
+        generate_smp.assert_not_called()
 
     def test_empty_extent_skips_generator(self):
         """An empty extent should not call the generator (return True to let processAlgorithm handle it)."""
@@ -1970,6 +2131,111 @@ class TestCheckParameterValues(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertIn('between 3 and 5', msg)
+
+    def test_default_tile_format_index_prefers_webp_when_supported(self):
+        """WEBP should remain the default when runtime encoding support exists."""
+        algo = self._make_algorithm()
+        generator_cls = algo.default_tile_format_index.__globals__['SMPGenerator']
+
+        with patch.object(generator_cls, 'is_tile_format_supported', return_value=True) as support_mock:
+            index = algo.default_tile_format_index()
+
+        self.assertEqual(index, algo.TILE_FORMAT_OPTIONS.index('WEBP'))
+        support_mock.assert_called_once_with(generator_cls.TILE_FORMAT_WEBP)
+
+    def test_default_tile_format_index_falls_back_to_jpg_when_webp_unsupported(self):
+        """JPG should become the default when WEBP encoding is unavailable."""
+        algo = self._make_algorithm()
+        generator_cls = algo.default_tile_format_index.__globals__['SMPGenerator']
+
+        with patch.object(generator_cls, 'is_tile_format_supported', side_effect=[False, True]) as support_mock:
+            index = algo.default_tile_format_index()
+
+        self.assertEqual(index, algo.TILE_FORMAT_OPTIONS.index('JPG'))
+        self.assertEqual(
+            support_mock.call_args_list,
+            [
+                ((generator_cls.TILE_FORMAT_WEBP,), {}),
+                ((generator_cls.TILE_FORMAT_JPG,), {}),
+            ]
+        )
+
+    def test_default_tile_format_index_falls_back_to_png_when_webp_and_jpg_unsupported(self):
+        """PNG should become the default when WEBP and JPG encoders are unavailable."""
+        algo = self._make_algorithm()
+        generator_cls = algo.default_tile_format_index.__globals__['SMPGenerator']
+
+        with patch.object(generator_cls, 'is_tile_format_supported', side_effect=[False, False, True]) as support_mock:
+            index = algo.default_tile_format_index()
+
+        self.assertEqual(index, algo.TILE_FORMAT_OPTIONS.index('PNG'))
+        self.assertEqual(
+            support_mock.call_args_list,
+            [
+                ((generator_cls.TILE_FORMAT_WEBP,), {}),
+                ((generator_cls.TILE_FORMAT_JPG,), {}),
+                ((generator_cls.TILE_FORMAT_PNG,), {}),
+            ]
+        )
+
+    def test_init_algorithm_uses_capability_aware_tile_format_default(self):
+        """Processing enum default should come from the capability-aware helper."""
+        algo = self._make_algorithm()
+        algo.addParameter = MagicMock()
+        algo.default_tile_format_index = MagicMock(return_value=1)
+        enum_ctor = algo.initAlgorithm.__globals__['QgsProcessingParameterEnum']
+        enum_ctor.reset_mock()
+
+        algo.initAlgorithm(None)
+
+        tile_format_calls = [
+            call for call in enum_ctor.call_args_list
+            if call.args and call.args[0] == algo.TILE_FORMAT
+        ]
+        self.assertEqual(len(tile_format_calls), 1)
+        self.assertEqual(tile_format_calls[0].kwargs['defaultValue'], 1)
+        algo.default_tile_format_index.assert_called_once_with()
+
+    def test_process_algorithm_logs_world_coverage_with_corrected_numerator(self):
+        """Processing feedback must display world_coverage_tiles, not total_tiles."""
+        algo = self._make_algorithm()
+        extent = self._make_extent(0, 0, 1, 1)
+        int_values = {
+            algo.MIN_ZOOM: 2,
+            algo.MAX_ZOOM: 5,
+            algo.WORLD_MAX_ZOOM: 3,
+            algo.JPEG_QUALITY: 85,
+        }
+        algo.parameterAsExtent = MagicMock(return_value=extent)
+        algo.parameterAsInt = MagicMock(side_effect=lambda _p, key, _c: int_values[key])
+        algo.parameterAsBool = MagicMock(return_value=True)
+        algo.parameterAsEnum = MagicMock(return_value=algo.TILE_FORMAT_OPTIONS.index('PNG'))
+        algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
+
+        feedback = MagicMock()
+        export_plan = {
+            'total_tiles': 200,
+            'world_coverage_tiles': 85,
+            'world_tiles': 1365,
+            'world_pct': (85 / 1365) * 100,
+            'source_bounds': [-180.0, -85.0511, 180.0, 85.0511],
+            'sources': [],
+        }
+
+        import comapeo_smp_generator as _gen_mod
+        with patch.object(_gen_mod.SMPGenerator, '_build_export_plan', return_value=export_plan), \
+             patch.object(_gen_mod.SMPGenerator, 'estimate_tile_storage_bytes', return_value=1024 * 1024), \
+             patch.object(_gen_mod.SMPGenerator, 'generate_smp_from_canvas', return_value='/tmp/test.smp'):
+            result = algo.processAlgorithm({}, MagicMock(), feedback)
+
+        self.assertEqual(result, {algo.OUTPUT_FILE: '/tmp/test.smp'})
+        pushed_messages = [call.args[0] for call in feedback.pushInfo.call_args_list]
+        coverage_message = next(
+            msg for msg in pushed_messages
+            if msg.startswith('Estimated world pyramid coverage:')
+        )
+        self.assertIn('(85/1,365 tiles)', coverage_message)
+        self.assertNotIn('(200/1,365 tiles)', coverage_message)
 
 
 class TestPluginLifecycle(unittest.TestCase):
@@ -2054,7 +2320,7 @@ class TestSMPArchiveStructure(unittest.TestCase):
 
         # Create a fake tile tree: z=0/x=0/y=0.png
         tiles_dir = os.path.join(self.tmp, 'tiles')
-        tile_file_dir = os.path.join(tiles_dir, '0', '0')
+        tile_file_dir = os.path.join(tiles_dir, '0', '0', '0')
         os.makedirs(tile_file_dir, exist_ok=True)
         tile_path = os.path.join(tile_file_dir, '0.png')
         with open(tile_path, 'wb') as f:
@@ -2206,7 +2472,7 @@ class TestVersionFileInArchive(unittest.TestCase):
             json.dump({"version": 8, "sources": {}, "layers": []}, f)
 
         tiles_dir = os.path.join(self.tmp, 'tiles')
-        tile_file_dir = os.path.join(tiles_dir, '0', '0')
+        tile_file_dir = os.path.join(tiles_dir, '0', '0', '0')
         os.makedirs(tile_file_dir, exist_ok=True)
         with open(os.path.join(tile_file_dir, '0.png'), 'wb') as f:
             f.write(b'\x89PNG\r\n\x1a\n')
@@ -2304,35 +2570,99 @@ class TestWebPFormatSupport(unittest.TestCase):
         source = list(style['sources'].values())[0]
         self.assertEqual(source['format'], 'webp')
 
-    def test_webp_accepted_by_generate_smp(self):
-        """generate_smp_from_canvas must accept 'WEBP' without raising ValueError."""
+    def test_generate_smp_accepts_webp_when_runtime_supports_it(self):
+        """WEBP generation should proceed when the runtime explicitly reports WEBP support."""
         gen = SMPGenerator()
-        gen.validate_tile_count = MagicMock(return_value=(1, None))
+        gen._build_export_plan = MagicMock(return_value={
+            'total_tiles': 1,
+            'world_pct': 100,
+            'source_bounds': [-1, -1, 1, 1],
+            'sources': []
+        })
         gen.validate_extent_size = MagicMock(return_value=None)
         gen.validate_disk_space = MagicMock()
         gen._create_style_from_canvas = MagicMock(return_value={"version": 8})
         gen._generate_tiles_from_canvas = MagicMock()
-        gen._build_smp_archive = MagicMock()
-        gen._get_bounds_wgs84 = MagicMock(return_value=[-1, -1, 1, 1])
+        gen._build_smp_archive = MagicMock(return_value=True)
 
         tmp = tempfile.mkdtemp()
         try:
             out = os.path.join(tmp, 'test.smp')
             extent = _FakeRectangle(-1, -1, 1, 1)
-            gen.generate_smp_from_canvas(
-                extent, 0, 1, out, tile_format='WEBP'
-            )
+            with patch('comapeo_smp_generator.QImageWriter.supportedImageFormats',
+                       return_value=[b'png', b'jpeg', b'webp']):
+                result = gen.generate_smp_from_canvas(
+                    extent, 0, 1, out, tile_format='WEBP'
+                )
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
-        # If we get here without ValueError, the test passes
+
+        self.assertEqual(result, out)
+        gen._build_export_plan.assert_called_once()
+        gen._create_style_from_canvas.assert_called_once()
+        gen._generate_tiles_from_canvas.assert_called_once()
+
+    def test_is_tile_format_supported_uses_qt_encoder_capabilities(self):
+        """Runtime output support should come from Qt encoder capabilities."""
+        with patch('comapeo_smp_generator.QImageWriter.supportedImageFormats',
+                   return_value=[b'png', b'jpeg']):
+            self.assertTrue(SMPGenerator.is_tile_format_supported('PNG'))
+            self.assertTrue(SMPGenerator.is_tile_format_supported('JPG'))
+            self.assertFalse(SMPGenerator.is_tile_format_supported('WEBP'))
+            self.assertFalse(SMPGenerator.is_tile_format_supported('GIF'))
+
+    def test_is_tile_format_supported_accepts_jpg_alias(self):
+        """JPEG support detection should accept Qt runtimes that report 'jpg'."""
+        with patch('comapeo_smp_generator.QImageWriter.supportedImageFormats',
+                   return_value=[b'png', b'jpg']):
+            self.assertTrue(SMPGenerator.is_tile_format_supported('JPG'))
+
+    def test_validate_tile_format_rejects_empty_string(self):
+        """Empty-string direct caller input should remain invalid."""
+        with self.assertRaisesRegex(ValueError, 'Unsupported tile format'):
+            SMPGenerator.validate_tile_format('')
+
+    def test_generate_smp_rejects_unsupported_webp_before_rendering(self):
+        """Unsupported runtime WEBP output should fail during startup validation."""
+        gen = SMPGenerator()
+        gen._build_export_plan = MagicMock(return_value={
+            'total_tiles': 1,
+            'world_pct': 100,
+            'source_bounds': [-1, -1, 1, 1],
+            'sources': []
+        })
+        gen.validate_extent_size = MagicMock(return_value=None)
+        gen.validate_disk_space = MagicMock()
+        gen._create_style_from_canvas = MagicMock()
+        gen._generate_tiles_from_canvas = MagicMock()
+
+        tmp = tempfile.mkdtemp()
+        try:
+            out = os.path.join(tmp, 'test.smp')
+            extent = _FakeRectangle(-1, -1, 1, 1)
+            with patch('comapeo_smp_generator.QImageWriter.supportedImageFormats',
+                       return_value=[b'png', b'jpeg']):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    'Tile format WEBP is not supported for output by this runtime.'
+                ):
+                    gen.generate_smp_from_canvas(
+                        extent, 0, 1, out, tile_format='WEBP'
+                    )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        gen._build_export_plan.assert_not_called()
+        gen._create_style_from_canvas.assert_not_called()
+        gen._generate_tiles_from_canvas.assert_not_called()
 
     def test_webp_tile_paths_in_manifest(self):
-        """_tile_paths_from_plan must produce .webp extensions for WEBP format."""
-        tiles_by_zoom = [(0, 0, 0, 0, 0, 1)]
-        paths = SMPGenerator._tile_paths_from_plan(tiles_by_zoom, 'WEBP')
-        self.assertIn('0/0/0.webp', paths)
-        self.assertNotIn('0/0/0.png', paths)
-        self.assertNotIn('0/0/0.jpg', paths)
+        """_tile_paths_from_source_plans must produce .webp extensions for WEBP format."""
+        source_plans = [{'tiles_by_zoom': [(0, 0, 0, 0, 0, 1, 0)], 'source_index': 0}]
+        paths = SMPGenerator._tile_paths_from_source_plans(source_plans, 'WEBP')
+        self.assertIn('0/0/0/0.webp', paths)
+        self.assertNotIn('0/0/0/0.png', paths)
+        self.assertNotIn('0/0/0/0.jpg', paths)
 
     def test_webp_archive_contains_webp_tiles(self):
         """Archive built with WEBP tiles must contain .webp entries."""
@@ -2345,7 +2675,7 @@ class TestWebPFormatSupport(unittest.TestCase):
                 json.dump({"version": 8, "sources": {}, "layers": []}, f)
 
             tiles_dir = os.path.join(tmp, 'tiles')
-            tile_file_dir = os.path.join(tiles_dir, '0', '0')
+            tile_file_dir = os.path.join(tiles_dir, '0', '0', '0')
             os.makedirs(tile_file_dir, exist_ok=True)
             with open(os.path.join(tile_file_dir, '0.webp'), 'wb') as f:
                 f.write(b'RIFF\x00\x00\x00\x00WEBP')
@@ -2375,7 +2705,7 @@ class TestWebPFormatSupport(unittest.TestCase):
                 json.dump({"version": 8, "sources": {}, "layers": []}, f)
 
             tiles_dir = os.path.join(tmp, 'tiles')
-            tile_file_dir = os.path.join(tiles_dir, '0', '0')
+            tile_file_dir = os.path.join(tiles_dir, '0', '0', '0')
             os.makedirs(tile_file_dir, exist_ok=True)
             with open(os.path.join(tile_file_dir, '0.webp'), 'wb') as f:
                 f.write(b'RIFF\x00\x00\x00\x00WEBP')
@@ -2448,7 +2778,7 @@ class TestTileDeduplication(unittest.TestCase):
         # Create 4 tiles with the SAME content (simulating uniform low-zoom tiles)
         identical_content = b'\x89PNG\r\n\x1a\n' + b'\x00' * 100
         for z, x, y in [(0, 0, 0), (1, 0, 0), (1, 0, 1), (1, 1, 0)]:
-            d = os.path.join(tiles_dir, str(z), str(x))
+            d = os.path.join(tiles_dir, '0', str(z), str(x))
             os.makedirs(d, exist_ok=True)
             with open(os.path.join(d, f'{y}.png'), 'wb') as f:
                 f.write(identical_content)
@@ -2492,6 +2822,7 @@ class TestTileDeduplication(unittest.TestCase):
         """
         import zipfile
         import struct
+        import warnings as _warnings
         identical_content = b'\x89PNG\r\n\x1a\n' + b'\x00' * 100
         smp = self._build_smp_with_duplicate_tiles(dedup_enabled=True)
         with zipfile.ZipFile(smp) as zf:
@@ -2502,7 +2833,9 @@ class TestTileDeduplication(unittest.TestCase):
                     first_names.add(info.filename)
                     break  # only check first tile
             for name in first_names:
-                content = zf.read(name)
+                with _warnings.catch_warnings():
+                    _warnings.simplefilter("ignore", UserWarning)
+                    content = zf.read(name)
                 self.assertEqual(content, identical_content,
                                  f"Tile {name} content mismatch after dedup")
 
@@ -2550,7 +2883,7 @@ class TestTileDeduplication(unittest.TestCase):
         tiles_dir = os.path.join(self.tmp, 'tiles_unique')
         # Create tiles with UNIQUE content
         for i, (z, x, y) in enumerate([(0, 0, 0), (1, 0, 0)]):
-            d = os.path.join(tiles_dir, str(z), str(x))
+            d = os.path.join(tiles_dir, '0', str(z), str(x))
             os.makedirs(d, exist_ok=True)
             with open(os.path.join(d, f'{y}.png'), 'wb') as f:
                 f.write(f'\x89PNG unique {i}'.encode())
@@ -2616,7 +2949,7 @@ class TestTileDeduplication(unittest.TestCase):
         tiles_dir = os.path.join(self.tmp, 'tiles_p1')
         identical_content = b'\x89PNG\r\n\x1a\n' + b'\x00' * 100
         for z, x, y in [(0, 0, 0), (1, 0, 0), (1, 0, 1), (1, 1, 0)]:
-            d = os.path.join(tiles_dir, str(z), str(x))
+            d = os.path.join(tiles_dir, '0', str(z), str(x))
             os.makedirs(d, exist_ok=True)
             with open(os.path.join(d, f'{y}.png'), 'wb') as f:
                 f.write(identical_content)
@@ -2662,7 +2995,7 @@ class TestTileDeduplication(unittest.TestCase):
         tiles_dir = os.path.join(self.tmp, 'tiles_p2')
         identical_content = b'\x89PNG\r\n\x1a\n' + b'\x00' * 100
         for z, x, y in [(0, 0, 0), (1, 0, 0), (1, 0, 1), (1, 1, 0)]:
-            d = os.path.join(tiles_dir, str(z), str(x))
+            d = os.path.join(tiles_dir, '0', str(z), str(x))
             os.makedirs(d, exist_ok=True)
             with open(os.path.join(d, f'{y}.png'), 'wb') as f:
                 f.write(identical_content)
@@ -2701,7 +3034,7 @@ class TestTileDeduplication(unittest.TestCase):
         tiles_dir = os.path.join(self.tmp, 'tiles_nofb')
         identical_content = b'\x89PNG\r\n\x1a\n' + b'\x00' * 100
         for z, x, y in [(0, 0, 0), (1, 0, 0)]:
-            d = os.path.join(tiles_dir, str(z), str(x))
+            d = os.path.join(tiles_dir, '0', str(z), str(x))
             os.makedirs(d, exist_ok=True)
             with open(os.path.join(d, f'{y}.png'), 'wb') as f:
                 f.write(identical_content)
@@ -2731,7 +3064,7 @@ class TestTileDeduplication(unittest.TestCase):
 
         tiles_dir = os.path.join(self.tmp, 'tiles_err')
         for z, x, y in [(0, 0, 0), (1, 0, 0)]:
-            d = os.path.join(tiles_dir, str(z), str(x))
+            d = os.path.join(tiles_dir, '0', str(z), str(x))
             os.makedirs(d, exist_ok=True)
             with open(os.path.join(d, f'{y}.png'), 'wb') as f:
                 f.write(b'\x89PNG unique_' + str(z).encode())
@@ -2843,19 +3176,19 @@ class TestTileDeduplication(unittest.TestCase):
         # 4 current tiles (identical content)
         current = [(0, 0, 0), (1, 0, 0), (1, 0, 1), (1, 1, 0)]
         for z, x, y in current:
-            d = os.path.join(tiles_dir, str(z), str(x))
+            d = os.path.join(tiles_dir, '0', str(z), str(x))
             os.makedirs(d, exist_ok=True)
             with open(os.path.join(d, f'{y}.png'), 'wb') as f:
                 f.write(identical_content)
 
         # 2 stale tiles (different content)
         for z, x, y in [(2, 0, 0), (2, 0, 1)]:
-            d = os.path.join(tiles_dir, str(z), str(x))
+            d = os.path.join(tiles_dir, '0', str(z), str(x))
             os.makedirs(d, exist_ok=True)
             with open(os.path.join(d, f'{y}.png'), 'wb') as f:
                 f.write(b'\x89PNG stale')
 
-        tile_paths = {f'{z}/{x}/{y}.png' for z, x, y in current}
+        tile_paths = {f'0/{z}/{x}/{y}.png' for z, x, y in current}
 
         out_dedup = os.path.join(self.tmp, 'filter_dedup.smp')
         result = gen._build_smp_archive(
@@ -2974,7 +3307,7 @@ class TestSMPValidation(unittest.TestCase):
 
         tiles_dir = os.path.join(self.tmp, 'tiles')
         for z, x, y in [(0, 0, 0), (1, 0, 0), (1, 0, 1), (1, 1, 0), (1, 1, 1)]:
-            d = os.path.join(tiles_dir, str(z), str(x))
+            d = os.path.join(tiles_dir, '0', str(z), str(x))
             os.makedirs(d, exist_ok=True)
             with open(os.path.join(d, f'{y}.{tile_ext}'), 'wb') as f:
                 f.write(tile_content)
@@ -3122,7 +3455,7 @@ class TestZipCompressionMethods(unittest.TestCase):
             json.dump({"version": 8, "sources": {}, "layers": []}, f)
 
         tiles_dir = os.path.join(self.tmp, 'tiles')
-        tile_file_dir = os.path.join(tiles_dir, '0', '0')
+        tile_file_dir = os.path.join(tiles_dir, '0', '0', '0')
         os.makedirs(tile_file_dir, exist_ok=True)
         with open(os.path.join(tile_file_dir, '0.png'), 'wb') as f:
             f.write(b'\x89PNG\r\n\x1a\n')
@@ -3156,6 +3489,1337 @@ class TestZipCompressionMethods(unittest.TestCase):
             style_info.compress_type, zipfile.ZIP_DEFLATED,
             f"style.json should use ZIP_DEFLATED, got {style_info.compress_type}"
         )
+
+
+# ===================================================================
+# Tests for Separate World Sources (multi-source SMP)
+# ===================================================================
+
+class TestBuildSingleSourcePlan(unittest.TestCase):
+    """Tests for _build_single_source_plan helper."""
+
+    def setUp(self):
+        self.gen = SMPGenerator()
+        self.gen._get_bounds_wgs84 = lambda ext: [
+            ext.xMinimum(), ext.yMinimum(), ext.xMaximum(), ext.yMaximum()
+        ]
+        self.world_extent = _FakeRectangle(-180, -85.0511, 180, 85.0511)
+        self.user_extent = _FakeRectangle(-1, -1, 1, 1)
+        self.gen.get_world_extent = lambda: self.world_extent
+
+    def test_world_source_plan_has_correct_source_id(self):
+        plan = self.gen._build_single_source_plan(
+            self.world_extent, list(range(0, 3)),
+            source_id="world-overview", source_index=0
+        )
+        self.assertEqual(plan['source_id'], 'world-overview')
+        self.assertEqual(plan['source_index'], 0)
+
+    def test_region_source_plan_has_correct_source_id(self):
+        plan = self.gen._build_single_source_plan(
+            self.user_extent, list(range(5, 8)),
+            source_id="region-detail", source_index=1
+        )
+        self.assertEqual(plan['source_id'], 'region-detail')
+        self.assertEqual(plan['source_index'], 1)
+
+    def test_world_source_covers_full_world_at_low_zooms(self):
+        plan = self.gen._build_single_source_plan(
+            self.world_extent, list(range(0, 3)),
+            source_id="world-overview", source_index=0
+        )
+        # At zoom 0, the whole world is 1 tile
+        self.assertEqual(plan['total_tiles'], sum(4**z for z in range(0, 3)))
+        self.assertEqual(plan['export_zooms'], [0, 1, 2])
+
+    def test_tiles_by_zoom_tuples_have_seven_elements(self):
+        plan = self.gen._build_single_source_plan(
+            self.user_extent, list(range(0, 2)),
+            source_id="region-detail", source_index=1
+        )
+        for entry in plan['tiles_by_zoom']:
+            self.assertEqual(len(entry), 7, f"Expected 7-tuple, got {entry}")
+
+    def test_source_index_in_tiles_by_zoom(self):
+        plan = self.gen._build_single_source_plan(
+            self.world_extent, [0],
+            source_id="world-overview", source_index=0
+        )
+        for entry in plan['tiles_by_zoom']:
+            self.assertEqual(entry[6], 0, "source_index should be 0")
+
+        plan2 = self.gen._build_single_source_plan(
+            self.user_extent, [5],
+            source_id="region-detail", source_index=1
+        )
+        for entry in plan2['tiles_by_zoom']:
+            self.assertEqual(entry[6], 1, "source_index should be 1")
+
+    def test_source_bounds_returned(self):
+        plan = self.gen._build_single_source_plan(
+            self.world_extent, [0],
+            source_id="world-overview", source_index=0
+        )
+        self.assertEqual(plan['source_bounds'], [-180, -85.0511, 180, 85.0511])
+
+    def test_antimeridian_region_extent_multiple_ranges(self):
+        """Region source with antimeridian-crossing extent must produce multiple ranges."""
+        antimeridian_extent = _FakeRectangle(170, -10, -170, 10)
+        plan = self.gen._build_single_source_plan(
+            antimeridian_extent, [4],
+            source_id="region-detail", source_index=1
+        )
+        # Should have at least 2 ranges at zoom 4 for antimeridian crossing
+        self.assertGreaterEqual(len(plan['tiles_by_zoom']), 2)
+        self.assertGreater(plan['total_tiles'], 0)
+
+
+class TestMultiSourceExportPlan(unittest.TestCase):
+    """Tests for _build_export_plan with separate sources."""
+
+    def setUp(self):
+        self.gen = SMPGenerator()
+        self.gen._get_bounds_wgs84 = lambda ext: [
+            ext.xMinimum(), ext.yMinimum(), ext.xMaximum(), ext.yMaximum()
+        ]
+        self.world_extent = _FakeRectangle(-180, -85.0511, 180, 85.0511)
+        self.user_extent = _FakeRectangle(-1, -1, 1, 1)
+        self.gen.get_world_extent = lambda: self.world_extent
+
+    @staticmethod
+    def _count_unique_tiles(plan):
+        covered = set()
+        for zoom, min_x, max_x, min_y, max_y, _, _ in plan['tiles_by_zoom']:
+            for x in range(min_x, max_x + 1):
+                for y in range(min_y, max_y + 1):
+                    covered.add((zoom, x, y))
+        return len(covered)
+
+    def test_world_disabled_has_single_source(self):
+        plan = self.gen._build_export_plan(
+            self.user_extent, 5, 10,
+            include_world_base_zooms=False
+        )
+        self.assertEqual(len(plan['sources']), 1)
+        self.assertEqual(plan['sources'][0]['source_id'], 'mbtiles-source')
+        self.assertEqual(plan['sources'][0]['source_index'], 0)
+
+    def test_world_enabled_has_two_sources(self):
+        plan = self.gen._build_export_plan(
+            self.user_extent, 5, 10,
+            include_world_base_zooms=True, world_max_zoom=3
+        )
+        self.assertEqual(len(plan['sources']), 2)
+        self.assertEqual(plan['sources'][0]['source_id'], 'world-overview')
+        self.assertEqual(plan['sources'][0]['source_index'], 0)
+        self.assertEqual(plan['sources'][1]['source_id'], 'region-detail')
+        self.assertEqual(plan['sources'][1]['source_index'], 1)
+
+    def test_world_source_zooms_start_at_zero(self):
+        plan = self.gen._build_export_plan(
+            self.user_extent, 5, 10,
+            include_world_base_zooms=True, world_max_zoom=3
+        )
+        world_source = plan['sources'][0]
+        self.assertEqual(world_source['export_zooms'][0], 0)
+        self.assertEqual(world_source['export_zooms'][-1], 3)
+
+    def test_world_source_max_zoom_supports_upper_bound_5(self):
+        """World source should include the full supported user-facing range up to zoom 5."""
+        plan = self.gen._build_export_plan(
+            self.user_extent, 5, 10,
+            include_world_base_zooms=True, world_max_zoom=5
+        )
+        world_source = plan['sources'][0]
+        self.assertEqual(world_source['export_zooms'][-1], 5)
+
+    def test_region_source_zooms_match_user_range(self):
+        plan = self.gen._build_export_plan(
+            self.user_extent, 5, 10,
+            include_world_base_zooms=True, world_max_zoom=3
+        )
+        region_source = plan['sources'][1]
+        self.assertEqual(region_source['export_zooms'], list(range(5, 11)))
+
+    def test_merged_tiles_by_zoom_preserves_order(self):
+        """World source tiles come first, then region source tiles."""
+        plan = self.gen._build_export_plan(
+            self.user_extent, 5, 10,
+            include_world_base_zooms=True, world_max_zoom=3
+        )
+        # All world tiles should have source_index=0, region tiles source_index=1
+        world_tiles = [t for t in plan['tiles_by_zoom'] if t[6] == 0]
+        region_tiles = [t for t in plan['tiles_by_zoom'] if t[6] == 1]
+        # World tiles come first in the merged list
+        first_region_idx = next(
+            i for i, t in enumerate(plan['tiles_by_zoom']) if t[6] == 1
+        )
+        last_world_idx = len(plan['tiles_by_zoom']) - len(region_tiles) - 1
+        # All entries before first_region_idx should be world (source_index=0)
+        for i in range(first_region_idx):
+            self.assertEqual(plan['tiles_by_zoom'][i][6], 0)
+
+    def test_total_tiles_is_sum_across_sources(self):
+        plan = self.gen._build_export_plan(
+            self.user_extent, 5, 10,
+            include_world_base_zooms=True, world_max_zoom=3
+        )
+        source_total = sum(s['total_tiles'] for s in plan['sources'])
+        self.assertEqual(plan['total_tiles'], source_total)
+
+    def test_world_coverage_tiles_matches_unique_export_tiles_when_enabled(self):
+        """world_coverage_tiles should count unique exported tiles across all sources."""
+        plan = self.gen._build_export_plan(
+            self.user_extent, 5, 10,
+            include_world_base_zooms=True, world_max_zoom=3
+        )
+        unique_tiles = self._count_unique_tiles(plan)
+        self.assertEqual(plan['world_coverage_tiles'], unique_tiles)
+        self.assertEqual(plan['world_coverage_tiles'], plan['total_tiles'])
+        self.assertGreater(plan['world_coverage_tiles'], plan['sources'][0]['total_tiles'])
+
+    def test_estimate_world_pyramid_percentage_returns_world_coverage_tiles(self):
+        """estimate_world_pyramid_percentage should expose the dedicated numerator."""
+        covered_tiles, world_tiles, world_pct = self.gen.estimate_world_pyramid_percentage(
+            self.user_extent, 5, 10,
+            include_world_base_zooms=True, world_max_zoom=3
+        )
+        plan = self.gen._build_export_plan(
+            self.user_extent, 5, 10,
+            include_world_base_zooms=True, world_max_zoom=3
+        )
+        self.assertEqual(covered_tiles, plan['world_coverage_tiles'])
+        self.assertEqual(world_tiles, plan['world_tiles'])
+        self.assertAlmostEqual(world_pct, plan['world_pct'], places=5)
+
+    def test_world_tiles_backward_compat(self):
+        """world_tiles must remain sum(4**z for z in export_zooms)."""
+        plan = self.gen._build_export_plan(
+            self.user_extent, 5, 10,
+            include_world_base_zooms=True, world_max_zoom=3
+        )
+        export_zooms = plan['export_zooms']
+        expected_world_tiles = sum(4**z for z in export_zooms)
+        self.assertEqual(plan['world_tiles'], expected_world_tiles)
+
+    def test_world_pct_backward_compat(self):
+        """world_pct must equal (world_coverage_tiles / world_tiles) * 100."""
+        plan = self.gen._build_export_plan(
+            self.user_extent, 5, 10,
+            include_world_base_zooms=True, world_max_zoom=3
+        )
+        if plan['world_tiles'] > 0:
+            expected_pct = (plan['world_coverage_tiles'] / plan['world_tiles']) * 100
+            self.assertAlmostEqual(plan['world_pct'], expected_pct, places=5)
+
+    def test_world_disabled_backward_compat(self):
+        """When world disabled, plan should look like current single-source."""
+        plan = self.gen._build_export_plan(
+            self.user_extent, 5, 10,
+            include_world_base_zooms=False
+        )
+        self.assertEqual(len(plan['sources']), 1)
+        self.assertEqual(plan['sources'][0]['source_id'], 'mbtiles-source')
+        self.assertEqual(plan['world_coverage_tiles'], plan['total_tiles'])
+        # tiles_by_zoom should all have source_index=0
+        for t in plan['tiles_by_zoom']:
+            self.assertEqual(t[6], 0)
+        # No source_index=1 entries
+        self.assertFalse(any(t[6] == 1 for t in plan['tiles_by_zoom']))
+
+    def test_world_tiles_backward_compat_when_disabled(self):
+        """world_tiles formula must also hold when world tiles are disabled."""
+        plan = self.gen._build_export_plan(
+            self.user_extent, 5, 10,
+            include_world_base_zooms=False
+        )
+        export_zooms = plan['export_zooms']
+        expected_world_tiles = sum(4**z for z in export_zooms)
+        self.assertEqual(plan['world_tiles'], expected_world_tiles)
+
+    def test_world_pct_backward_compat_when_disabled(self):
+        """world_pct formula must also hold when world tiles are disabled."""
+        plan = self.gen._build_export_plan(
+            self.user_extent, 5, 10,
+            include_world_base_zooms=False
+        )
+        if plan['world_tiles'] > 0:
+            expected_pct = (plan['world_coverage_tiles'] / plan['world_tiles']) * 100
+            self.assertAlmostEqual(plan['world_pct'], expected_pct, places=5)
+
+    def test_world_coverage_overlap_adds_region_only_tiles_without_double_counting(self):
+        """Overlap should include unique high-zoom region tiles without counting duplicated low zooms twice."""
+        plan = self.gen._build_export_plan(
+            self.user_extent, 2, 5,
+            include_world_base_zooms=True, world_max_zoom=3
+        )
+        unique_tiles = self._count_unique_tiles(plan)
+
+        self.assertEqual(plan['export_zooms'], [0, 1, 2, 3, 4, 5])
+        self.assertEqual(unique_tiles, 93)
+        self.assertEqual(plan['world_coverage_tiles'], unique_tiles)
+        self.assertGreater(plan['world_coverage_tiles'], plan['sources'][0]['total_tiles'])
+        self.assertLess(plan['world_coverage_tiles'], plan['total_tiles'])
+        self.assertEqual(plan['world_tiles'], 1365)
+        self.assertAlmostEqual(plan['world_pct'], (93 / 1365) * 100, places=5)
+
+    def test_world_coverage_gap_includes_region_only_tiles(self):
+        """A zoom gap should still count region-only high zoom tiles toward world coverage."""
+        plan = self.gen._build_export_plan(
+            self.user_extent, 6, 7,
+            include_world_base_zooms=True, world_max_zoom=3
+        )
+        unique_tiles = self._count_unique_tiles(plan)
+
+        self.assertEqual(plan['export_zooms'], [0, 1, 2, 3, 6, 7])
+        self.assertEqual(unique_tiles, 93)
+        self.assertEqual(plan['world_coverage_tiles'], unique_tiles)
+        self.assertEqual(plan['world_coverage_tiles'], plan['total_tiles'])
+        self.assertEqual(plan['world_tiles'], 20565)
+        self.assertAlmostEqual(plan['world_pct'], (93 / 20565) * 100, places=5)
+
+    def test_world_disabled_single_source_coverage_uses_total_tiles(self):
+        """Single-source exports must keep world coverage equal to the export total."""
+        plan = self.gen._build_export_plan(
+            self.world_extent, 0, 3,
+            include_world_base_zooms=False
+        )
+
+        self.assertEqual(plan['export_zooms'], [0, 1, 2, 3])
+        self.assertEqual(plan['total_tiles'], 85)
+        self.assertEqual(plan['world_coverage_tiles'], 85)
+        self.assertEqual(plan['world_tiles'], 85)
+        self.assertEqual(plan['world_pct'], 100.0)
+
+
+class TestMultiSourceStyleJson(unittest.TestCase):
+    """Tests for _create_style_from_canvas with source_plans."""
+
+    def setUp(self):
+        self.gen = SMPGenerator()
+        self.gen._get_bounds_wgs84 = MagicMock(return_value=[-1, -1, 1, 1])
+
+    def _make_extent(self):
+        return _FakeRectangle(-1, -1, 1, 1)
+
+    def test_single_source_style_backward_compat(self):
+        """With source_plans=None, style should be single-source (backward compat)."""
+        style = self.gen._create_style_from_canvas(
+            self._make_extent(), 5, 10, 'PNG'
+        )
+        self.assertEqual(len(style['sources']), 1)
+        source_id = list(style['sources'].keys())[0]
+        self.assertEqual(source_id, 'mbtiles-source')
+
+    def test_single_source_style_with_one_plan(self):
+        """With source_plans having 1 entry, style should be single-source."""
+        source_plans = [{
+            'source_id': 'mbtiles-source',
+            'source_index': 0,
+            'source_bounds': [-1, -1, 1, 1],
+            'export_zooms': list(range(5, 11)),
+            'tiles_by_zoom': [],
+            'total_tiles': 0
+        }]
+        style = self.gen._create_style_from_canvas(
+            self._make_extent(), 5, 10, 'PNG',
+            source_plans=source_plans
+        )
+        self.assertEqual(len(style['sources']), 1)
+        self.assertIn('mbtiles-source', style['sources'])
+        self.assertEqual(style['metadata']['smp:sourceFolders']['mbtiles-source'], 's/0')
+
+    def test_two_source_style_has_two_sources(self):
+        """With 2 source plans, style should have two sources."""
+        source_plans = [
+            {
+                'source_id': 'world-overview',
+                'source_index': 0,
+                'source_bounds': [-180, -85.0511, 180, 85.0511],
+                'export_zooms': list(range(0, 4)),
+                'tiles_by_zoom': [],
+                'total_tiles': 85
+            },
+            {
+                'source_id': 'region-detail',
+                'source_index': 1,
+                'source_bounds': [-1, -1, 1, 1],
+                'export_zooms': list(range(5, 11)),
+                'tiles_by_zoom': [],
+                'total_tiles': 100
+            }
+        ]
+        style = self.gen._create_style_from_canvas(
+            self._make_extent(), 5, 10, 'PNG',
+            source_plans=source_plans
+        )
+        self.assertEqual(len(style['sources']), 2)
+        self.assertIn('world-overview', style['sources'])
+        self.assertIn('region-detail', style['sources'])
+
+    def test_two_source_style_has_two_raster_layers(self):
+        """Multi-source style should have background + world-raster + region-raster layers."""
+        source_plans = [
+            {
+                'source_id': 'world-overview',
+                'source_index': 0,
+                'source_bounds': [-180, -85.0511, 180, 85.0511],
+                'export_zooms': list(range(0, 4)),
+                'tiles_by_zoom': [],
+                'total_tiles': 85
+            },
+            {
+                'source_id': 'region-detail',
+                'source_index': 1,
+                'source_bounds': [-1, -1, 1, 1],
+                'export_zooms': list(range(5, 11)),
+                'tiles_by_zoom': [],
+                'total_tiles': 100
+            }
+        ]
+        style = self.gen._create_style_from_canvas(
+            self._make_extent(), 5, 10, 'PNG',
+            source_plans=source_plans
+        )
+        raster_layers = [l for l in style['layers'] if l['type'] == 'raster']
+        self.assertEqual(len(raster_layers), 2)
+        source_refs = {l['source'] for l in raster_layers}
+        self.assertEqual(source_refs, {'world-overview', 'region-detail'})
+
+    def test_two_source_style_has_two_source_folders(self):
+        """smp:sourceFolders should have entries for both sources."""
+        source_plans = [
+            {
+                'source_id': 'world-overview',
+                'source_index': 0,
+                'source_bounds': [-180, -85.0511, 180, 85.0511],
+                'export_zooms': list(range(0, 4)),
+                'tiles_by_zoom': [],
+                'total_tiles': 85
+            },
+            {
+                'source_id': 'region-detail',
+                'source_index': 1,
+                'source_bounds': [-1, -1, 1, 1],
+                'export_zooms': list(range(5, 11)),
+                'tiles_by_zoom': [],
+                'total_tiles': 100
+            }
+        ]
+        style = self.gen._create_style_from_canvas(
+            self._make_extent(), 5, 10, 'PNG',
+            source_plans=source_plans
+        )
+        folders = style['metadata']['smp:sourceFolders']
+        self.assertEqual(folders['world-overview'], 's/0')
+        self.assertEqual(folders['region-detail'], 's/1')
+
+    def test_two_source_world_overview_bounds(self):
+        """World overview source should have full-world bounds."""
+        source_plans = [
+            {
+                'source_id': 'world-overview',
+                'source_index': 0,
+                'source_bounds': [-180, -85.0511, 180, 85.0511],
+                'export_zooms': list(range(0, 4)),
+                'tiles_by_zoom': [],
+                'total_tiles': 85
+            },
+            {
+                'source_id': 'region-detail',
+                'source_index': 1,
+                'source_bounds': [-1, -1, 1, 1],
+                'export_zooms': list(range(5, 11)),
+                'tiles_by_zoom': [],
+                'total_tiles': 100
+            }
+        ]
+        style = self.gen._create_style_from_canvas(
+            self._make_extent(), 5, 10, 'PNG',
+            source_plans=source_plans
+        )
+        world_src = style['sources']['world-overview']
+        self.assertEqual(world_src['bounds'], [-180, -85.0511, 180, 85.0511])
+        self.assertEqual(world_src['minzoom'], 0)
+        self.assertEqual(world_src['maxzoom'], 3)
+
+    def test_two_source_region_detail_bounds(self):
+        """Region detail source should have user extent bounds."""
+        source_plans = [
+            {
+                'source_id': 'world-overview',
+                'source_index': 0,
+                'source_bounds': [-180, -85.0511, 180, 85.0511],
+                'export_zooms': list(range(0, 4)),
+                'tiles_by_zoom': [],
+                'total_tiles': 85
+            },
+            {
+                'source_id': 'region-detail',
+                'source_index': 1,
+                'source_bounds': [-1, -1, 1, 1],
+                'export_zooms': list(range(5, 11)),
+                'tiles_by_zoom': [],
+                'total_tiles': 100
+            }
+        ]
+        style = self.gen._create_style_from_canvas(
+            self._make_extent(), 5, 10, 'PNG',
+            source_plans=source_plans
+        )
+        region_src = style['sources']['region-detail']
+        self.assertEqual(region_src['bounds'], [-1, -1, 1, 1])
+        self.assertEqual(region_src['minzoom'], 5)
+        self.assertEqual(region_src['maxzoom'], 10)
+
+    def test_smp_bounds_uses_region_not_world(self):
+        """smp:bounds must use region-detail bounds (highest maxzoom source)."""
+        source_plans = [
+            {
+                'source_id': 'world-overview',
+                'source_index': 0,
+                'source_bounds': [-180, -85.0511, 180, 85.0511],
+                'export_zooms': list(range(0, 4)),
+                'tiles_by_zoom': [],
+                'total_tiles': 85
+            },
+            {
+                'source_id': 'region-detail',
+                'source_index': 1,
+                'source_bounds': [-1, -1, 1, 1],
+                'export_zooms': list(range(5, 11)),
+                'tiles_by_zoom': [],
+                'total_tiles': 100
+            }
+        ]
+        style = self.gen._create_style_from_canvas(
+            self._make_extent(), 5, 10, 'PNG',
+            source_plans=source_plans
+        )
+        self.assertEqual(style['metadata']['smp:bounds'], [-1, -1, 1, 1])
+        self.assertEqual(style['metadata']['smp:maxzoom'], 10)
+
+    def test_source_tiles_url_includes_source_index(self):
+        """World tiles URL should use s/0/, region tiles URL should use s/1/."""
+        source_plans = [
+            {
+                'source_id': 'world-overview',
+                'source_index': 0,
+                'source_bounds': [-180, -85.0511, 180, 85.0511],
+                'export_zooms': list(range(0, 4)),
+                'tiles_by_zoom': [],
+                'total_tiles': 85
+            },
+            {
+                'source_id': 'region-detail',
+                'source_index': 1,
+                'source_bounds': [-1, -1, 1, 1],
+                'export_zooms': list(range(5, 11)),
+                'tiles_by_zoom': [],
+                'total_tiles': 100
+            }
+        ]
+        style = self.gen._create_style_from_canvas(
+            self._make_extent(), 5, 10, 'PNG',
+            source_plans=source_plans
+        )
+        world_tiles_url = style['sources']['world-overview']['tiles'][0]
+        region_tiles_url = style['sources']['region-detail']['tiles'][0]
+        self.assertIn('s/0/', world_tiles_url)
+        self.assertIn('s/1/', region_tiles_url)
+
+    def test_sources_have_format_name_version(self):
+        """Each source should have format, name, and version properties."""
+        source_plans = [
+            {
+                'source_id': 'world-overview',
+                'source_index': 0,
+                'source_bounds': [-180, -85.0511, 180, 85.0511],
+                'export_zooms': list(range(0, 4)),
+                'tiles_by_zoom': [],
+                'total_tiles': 85
+            },
+            {
+                'source_id': 'region-detail',
+                'source_index': 1,
+                'source_bounds': [-1, -1, 1, 1],
+                'export_zooms': list(range(5, 11)),
+                'tiles_by_zoom': [],
+                'total_tiles': 100
+            }
+        ]
+        style = self.gen._create_style_from_canvas(
+            self._make_extent(), 5, 10, 'PNG',
+            source_plans=source_plans
+        )
+        for src_id, src in style['sources'].items():
+            self.assertIn('format', src)
+            self.assertIn('name', src)
+            self.assertIn('version', src)
+            self.assertEqual(src['version'], '2.0')
+
+    def test_center_derived_from_region_bounds(self):
+        """Root center should be derived from region-detail bounds."""
+        source_plans = [
+            {
+                'source_id': 'world-overview',
+                'source_index': 0,
+                'source_bounds': [-180, -85.0511, 180, 85.0511],
+                'export_zooms': list(range(0, 4)),
+                'tiles_by_zoom': [],
+                'total_tiles': 85
+            },
+            {
+                'source_id': 'region-detail',
+                'source_index': 1,
+                'source_bounds': [-10, -20, 30, 40],
+                'export_zooms': list(range(5, 11)),
+                'tiles_by_zoom': [],
+                'total_tiles': 100
+            }
+        ]
+        style = self.gen._create_style_from_canvas(
+            self._make_extent(), 5, 10, 'PNG',
+            source_plans=source_plans
+        )
+        # Center should be midpoint of region bounds
+        self.assertAlmostEqual(style['center'][0], (-10 + 30) / 2)
+        self.assertAlmostEqual(style['center'][1], (-20 + 40) / 2)
+
+
+class TestTilePathsFromSourcePlans(unittest.TestCase):
+    """Tests for _tile_paths_from_source_plans static method."""
+
+    def test_single_source_produces_zero_prefixed_paths(self):
+        """Single source (source_index=0) should produce paths like 0/{z}/{x}/{y}.png."""
+        source_plans = [{
+            'tiles_by_zoom': [(0, 0, 0, 0, 0, 1, 0)],
+            'source_index': 0
+        }]
+        paths = SMPGenerator._tile_paths_from_source_plans(source_plans, 'PNG')
+        self.assertIn('0/0/0/0.png', paths)
+
+    def test_two_sources_produce_separate_paths(self):
+        """Two sources should produce paths with different source_index prefixes."""
+        source_plans = [
+            {'tiles_by_zoom': [(0, 0, 0, 0, 0, 1, 0)], 'source_index': 0},
+            {'tiles_by_zoom': [(5, 3, 3, 7, 7, 1, 1)], 'source_index': 1}
+        ]
+        paths = SMPGenerator._tile_paths_from_source_plans(source_plans, 'PNG')
+        self.assertIn('0/0/0/0.png', paths)
+        self.assertIn('1/5/3/7.png', paths)
+
+    def test_webp_extension(self):
+        """Should use .webp extension for WEBP format."""
+        source_plans = [
+            {'tiles_by_zoom': [(0, 0, 0, 0, 0, 1, 0)], 'source_index': 0}
+        ]
+        paths = SMPGenerator._tile_paths_from_source_plans(source_plans, 'WEBP')
+        self.assertIn('0/0/0/0.webp', paths)
+        self.assertNotIn('.png', str(paths))
+
+    def test_multi_range_tiles(self):
+        """Should handle tiles_by_zoom with multiple ranges per zoom (antimeridian)."""
+        source_plans = [{
+            'tiles_by_zoom': [
+                (4, 15, 15, 5, 5, 1, 0),  # first range
+                (4, 0, 0, 5, 5, 1, 0),    # second range (antimeridian)
+            ],
+            'source_index': 0
+        }]
+        paths = SMPGenerator._tile_paths_from_source_plans(source_plans, 'PNG')
+        self.assertIn('0/4/15/5.png', paths)
+        self.assertIn('0/4/0/5.png', paths)
+
+
+class TestArchivePathsMultiSource(unittest.TestCase):
+    """Archive paths must use s/ prefix directly (not s/0/) since source_index is in tile path."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_single_source_tiles_under_s_0(self):
+        """Single source tiles should be archived under s/0/{z}/{x}/{y}."""
+        gen = SMPGenerator()
+        import json
+        style_path = os.path.join(self.tmp, 'style.json')
+        with open(style_path, 'w') as f:
+            json.dump({"version": 8, "sources": {}, "layers": []}, f)
+
+        tiles_dir = os.path.join(self.tmp, 'tiles')
+        # Tiles at source_index 0 path
+        tile_file_dir = os.path.join(tiles_dir, '0', '0', '0')
+        os.makedirs(tile_file_dir, exist_ok=True)
+        with open(os.path.join(tile_file_dir, '0.png'), 'wb') as f:
+            f.write(b'\x89PNG\r\n\x1a\n')
+
+        out_path = os.path.join(self.tmp, 'output.smp')
+        gen._build_smp_archive(
+            style_path=style_path,
+            tiles_dir=tiles_dir,
+            output_path=out_path
+        )
+
+        import zipfile
+        with zipfile.ZipFile(out_path) as zf:
+            names = zf.namelist()
+        self.assertIn('s/0/0/0/0.png', names)
+
+    def test_two_source_tiles_under_s_0_and_s_1(self):
+        """Two sources should have tiles under s/0/ and s/1/."""
+        gen = SMPGenerator()
+        import json
+        style_path = os.path.join(self.tmp, 'style.json')
+        with open(style_path, 'w') as f:
+            json.dump({"version": 8, "sources": {}, "layers": []}, f)
+
+        tiles_dir = os.path.join(self.tmp, 'tiles')
+        # Source 0 tile
+        s0_dir = os.path.join(tiles_dir, '0', '0', '0')
+        os.makedirs(s0_dir, exist_ok=True)
+        with open(os.path.join(s0_dir, '0.png'), 'wb') as f:
+            f.write(b'\x89PNG\r\n\x1a\n')
+        # Source 1 tile
+        s1_dir = os.path.join(tiles_dir, '1', '5', '3')
+        os.makedirs(s1_dir, exist_ok=True)
+        with open(os.path.join(s1_dir, '7.png'), 'wb') as f:
+            f.write(b'\x89PNG\r\n\x1a\n')
+
+        out_path = os.path.join(self.tmp, 'output.smp')
+        gen._build_smp_archive(
+            style_path=style_path,
+            tiles_dir=tiles_dir,
+            output_path=out_path
+        )
+
+        import zipfile
+        with zipfile.ZipFile(out_path) as zf:
+            names = zf.namelist()
+        self.assertIn('s/0/0/0/0.png', names)
+        self.assertIn('s/1/5/3/7.png', names)
+
+
+class TestTileCacheSourceIndex(unittest.TestCase):
+    """TileCache must use source_index in cache keys."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.cache = TileCache(self.tmp)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_fresh_with_source_index_zero(self):
+        fp = TileCache.make_fingerprint('PNG', 85)
+        self.cache.mark(0, 0, 0, fp, source_index=0)
+        self.assertTrue(self.cache.is_fresh(0, 0, 0, fp, source_index=0))
+
+    def test_different_source_index_not_fresh(self):
+        """Cache entries for source 0 should not be fresh for source 1."""
+        fp = TileCache.make_fingerprint('PNG', 85)
+        self.cache.mark(0, 0, 0, fp, source_index=0)
+        self.assertFalse(self.cache.is_fresh(0, 0, 0, fp, source_index=1))
+
+    def test_mark_with_source_index_persists(self):
+        fp = TileCache.make_fingerprint('PNG', 85)
+        self.cache.mark(5, 3, 7, fp, source_index=1)
+        cache2 = TileCache(self.tmp)
+        self.assertTrue(cache2.is_fresh(5, 3, 7, fp, source_index=1))
+        self.assertFalse(cache2.is_fresh(5, 3, 7, fp, source_index=0))
+
+    def test_invalidate_with_source_index(self):
+        fp = TileCache.make_fingerprint('PNG', 85)
+        self.cache.mark(0, 0, 0, fp, source_index=0)
+        self.cache.invalidate(0, 0, 0, source_index=0)
+        self.assertFalse(self.cache.is_fresh(0, 0, 0, fp, source_index=0))
+
+    def test_default_source_index_is_zero(self):
+        """Calling without source_index should default to 0."""
+        fp = TileCache.make_fingerprint('PNG', 85)
+        self.cache.mark(0, 0, 0, fp)
+        self.assertTrue(self.cache.is_fresh(0, 0, 0, fp))
+        self.assertTrue(self.cache.is_fresh(0, 0, 0, fp, source_index=0))
+
+
+class TestCacheSchemaMigration(unittest.TestCase):
+    """Cache schema must handle migration from old format."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_old_cache_meta_treated_as_stale(self):
+        """Cache meta without schema_version should be treated as stale."""
+        import json
+        # Write old-format cache meta (no schema_version)
+        meta_path = os.path.join(self.tmp, TileCache.META_FILE)
+        with open(meta_path, 'w') as f:
+            json.dump({"0/0/0": "PNG:85:fp1"}, f)
+
+        cache = TileCache(self.tmp)
+        fp = TileCache.make_fingerprint('PNG', 85, 'fp1')
+        # Old-format key "0/0/0" should not match new key "0/0/0/0"
+        self.assertFalse(cache.is_fresh(0, 0, 0, fp))
+
+    def test_schema_version_1_treated_as_stale(self):
+        """Cache meta with schema_version < 2 should be treated as stale."""
+        import json
+        meta_path = os.path.join(self.tmp, TileCache.META_FILE)
+        with open(meta_path, 'w') as f:
+            json.dump({"schema_version": 1, "0/0/0": "PNG:85:fp1"}, f)
+
+        cache = TileCache(self.tmp)
+        fp = TileCache.make_fingerprint('PNG', 85, 'fp1')
+        self.assertFalse(cache.is_fresh(0, 0, 0, fp))
+
+
+class TestRenderSingleTileSourceIndex(unittest.TestCase):
+    """_render_single_tile must place tiles in source_index subdirectory."""
+
+    def test_default_source_index_creates_zero_subdir(self):
+        gen = SMPGenerator()
+        gen._calculate_tile_extent = MagicMock(return_value=MagicMock())
+
+        fake_img = MagicMock()
+
+        def real_save(path, *args, **kwargs):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'wb') as f:
+                f.write(b'\x89PNG')
+            return True
+
+        fake_img.save.side_effect = real_save
+
+        tmp = tempfile.mkdtemp()
+        try:
+            with patch('comapeo_smp_generator.QImage', return_value=fake_img), \
+                 patch('comapeo_smp_generator.QPainter', MagicMock()), \
+                 patch('comapeo_smp_generator.QgsMapRendererCustomPainterJob', MagicMock()):
+                gen._render_single_tile(
+                    MagicMock(), 0, 0, 0, tmp,
+                    'PNG', 85, False
+                )
+            # Tile should be at tmp/0/0/0/0.png
+            self.assertTrue(
+                os.path.exists(os.path.join(tmp, '0', '0', '0', '0.png')),
+                "Tile should be at tiles_dir/0/z/x/y.ext"
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_source_index_1_creates_one_subdir(self):
+        gen = SMPGenerator()
+        gen._calculate_tile_extent = MagicMock(return_value=MagicMock())
+
+        fake_img = MagicMock()
+
+        def real_save(path, *args, **kwargs):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'wb') as f:
+                f.write(b'\x89PNG')
+            return True
+
+        fake_img.save.side_effect = real_save
+
+        tmp = tempfile.mkdtemp()
+        try:
+            with patch('comapeo_smp_generator.QImage', return_value=fake_img), \
+                 patch('comapeo_smp_generator.QPainter', MagicMock()), \
+                 patch('comapeo_smp_generator.QgsMapRendererCustomPainterJob', MagicMock()):
+                gen._render_single_tile(
+                    MagicMock(), 5, 3, 7, tmp,
+                    'PNG', 85, False,
+                    source_index=1
+                )
+            # Tile should be at tmp/1/5/3/7.png
+            self.assertTrue(
+                os.path.exists(os.path.join(tmp, '1', '5', '3', '7.png')),
+                "Tile should be at tiles_dir/1/z/x/y.ext"
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_resume_checks_source_index_path(self):
+        """Resume check should look at the correct source_index path."""
+        gen = SMPGenerator()
+        gen._calculate_tile_extent = MagicMock(return_value=MagicMock())
+
+        tmp = tempfile.mkdtemp()
+        try:
+            # Pre-create tile at source_index=1 path
+            tile_dir = os.path.join(tmp, '1', '0', '0')
+            os.makedirs(tile_dir, exist_ok=True)
+            tile_path = os.path.join(tile_dir, '0.png')
+            with open(tile_path, 'wb') as f:
+                f.write(b'FAKE')
+
+            fake_img = MagicMock()
+            fake_img.save.return_value = True
+
+            with patch('comapeo_smp_generator.QImage', return_value=fake_img), \
+                 patch('comapeo_smp_generator.QPainter', MagicMock()), \
+                 patch('comapeo_smp_generator.QgsMapRendererCustomPainterJob', MagicMock()):
+                result = gen._render_single_tile(
+                    MagicMock(), 0, 0, 0, tmp,
+                    'PNG', 85, True,
+                    source_index=1
+                )
+            # Should skip rendering because tile exists at source_index=1 path
+            fake_img.save.assert_not_called()
+            self.assertFalse(result)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestGenerateTilesWithSourceIndex(unittest.TestCase):
+    """_generate_tiles_from_canvas must thread source_index through pipeline."""
+
+    def test_tiles_placed_in_source_subdirs(self):
+        """Tiles should be placed in tiles_dir/{source_index}/{z}/{x}/{y}.{ext}."""
+        gen = SMPGenerator()
+        gen._get_bounds_wgs84 = MagicMock(return_value=[-1, -1, 1, 1])
+        gen._calculate_tiles_at_zoom = MagicMock(return_value=[(0, 0, 0, 0)])
+        gen._calculate_tile_extent = MagicMock(return_value=MagicMock())
+
+        import comapeo_smp_generator as _mod
+        fake_img = MagicMock()
+
+        def real_save(path, *args, **kwargs):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'wb') as f:
+                f.write(b'\x89PNG')
+            return True
+
+        fake_img.save.side_effect = real_save
+
+        tmp = tempfile.mkdtemp()
+        try:
+            with patch('comapeo_smp_generator.QImage', return_value=fake_img), \
+                 patch('comapeo_smp_generator.QPainter', MagicMock()), \
+                 patch('comapeo_smp_generator.QgsMapRendererCustomPainterJob', MagicMock()), \
+                 patch.object(_mod, 'QgsMapSettings', MagicMock()), \
+                 patch.object(_mod, 'QgsProject', _FakeProject):
+                gen._generate_tiles_from_canvas(
+                    _FakeRectangle(-1, -1, 1, 1), 0, 0, tmp,
+                    tile_format='PNG',
+                    export_plan={
+                        'total_tiles': 1,
+                        'tiles_by_zoom': [(0, 0, 0, 0, 0, 1, 0)],
+                    }
+                )
+            # Tile should be at tmp/0/0/0/0.png
+            self.assertTrue(
+                os.path.exists(os.path.join(tmp, '0', '0', '0', '0.png'))
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestZoomGapCase(unittest.TestCase):
+    """When min_zoom > max(2, world_max_zoom), sources have disjoint zoom ranges."""
+
+    def setUp(self):
+        self.gen = SMPGenerator()
+        self.gen._get_bounds_wgs84 = lambda ext: [
+            ext.xMinimum(), ext.yMinimum(), ext.xMaximum(), ext.yMaximum()
+        ]
+        self.world_extent = _FakeRectangle(-180, -85.0511, 180, 85.0511)
+        self.user_extent = _FakeRectangle(-1, -1, 1, 1)
+        self.gen.get_world_extent = lambda: self.world_extent
+
+    def test_disjoint_zoom_ranges(self):
+        """When min_zoom > world_max_zoom, world and region zooms should not overlap."""
+        plan = self.gen._build_export_plan(
+            self.user_extent, 8, 10,
+            include_world_base_zooms=True, world_max_zoom=3
+        )
+        world_zooms = plan['sources'][0]['export_zooms']
+        region_zooms = plan['sources'][1]['export_zooms']
+        # No overlap between world and region zoom ranges
+        self.assertEqual(set(world_zooms) & set(region_zooms), set())
+
+    def test_both_sources_generate_tiles(self):
+        """Both sources should produce tiles even with zoom gap."""
+        plan = self.gen._build_export_plan(
+            self.user_extent, 8, 10,
+            include_world_base_zooms=True, world_max_zoom=3
+        )
+        self.assertGreater(plan['sources'][0]['total_tiles'], 0)
+        self.assertGreater(plan['sources'][1]['total_tiles'], 0)
+
+
+class TestSMPRoundtripMultiSource(unittest.TestCase):
+    """Full SMP roundtrip test: generate archive, inspect contents."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_multi_source_archive_contains_both_source_trees(self):
+        """Archive should contain s/0/ and s/1/ tile trees."""
+        gen = SMPGenerator()
+        import json
+
+        style = {
+            "version": 8,
+            "name": "Test Multi-Source",
+            "sources": {
+                "world-overview": {
+                    "type": "raster",
+                    "format": "png",
+                    "minzoom": 0,
+                    "maxzoom": 2,
+                    "bounds": [-180, -85.0511, 180, 85.0511],
+                    "tiles": ["smp://maps.v1/s/0/{z}/{x}/{y}.png"]
+                },
+                "region-detail": {
+                    "type": "raster",
+                    "format": "png",
+                    "minzoom": 5,
+                    "maxzoom": 10,
+                    "bounds": [-1, -1, 1, 1],
+                    "tiles": ["smp://maps.v1/s/1/{z}/{x}/{y}.png"]
+                }
+            },
+            "layers": [
+                {"id": "background", "type": "background",
+                 "paint": {"background-color": "white"}},
+                {"id": "world-raster", "type": "raster", "source": "world-overview"},
+                {"id": "region-raster", "type": "raster", "source": "region-detail"}
+            ],
+            "metadata": {
+                "smp:bounds": [-1, -1, 1, 1],
+                "smp:maxzoom": 10,
+                "smp:sourceFolders": {
+                    "world-overview": "s/0",
+                    "region-detail": "s/1"
+                }
+            },
+            "center": [0, 0],
+            "zoom": 5
+        }
+
+        style_path = os.path.join(self.tmp, 'style.json')
+        with open(style_path, 'w') as f:
+            json.dump(style, f)
+
+        tiles_dir = os.path.join(self.tmp, 'tiles')
+        # World source tiles (source 0)
+        for z in range(0, 3):
+            n = 1 << z
+            for x in range(n):
+                for y in range(n):
+                    d = os.path.join(tiles_dir, '0', str(z), str(x))
+                    os.makedirs(d, exist_ok=True)
+                    with open(os.path.join(d, f'{y}.png'), 'wb') as f:
+                        f.write(b'\x89PNG\r\n\x1a\n')
+
+        # Region source tiles (source 1)
+        for z in [5]:
+            d = os.path.join(tiles_dir, '1', str(z), '16')
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, '16.png'), 'wb') as f:
+                f.write(b'\x89PNG\r\n\x1a\n')
+
+        out_path = os.path.join(self.tmp, 'multi.smp')
+        gen._build_smp_archive(
+            style_path=style_path,
+            tiles_dir=tiles_dir,
+            output_path=out_path
+        )
+
+        import zipfile
+        with zipfile.ZipFile(out_path) as zf:
+            names = set(zf.namelist())
+            style_data = json.loads(zf.read('style.json'))
+
+        # Both source trees present
+        s0_tiles = {n for n in names if n.startswith('s/0/')}
+        s1_tiles = {n for n in names if n.startswith('s/1/')}
+        self.assertGreater(len(s0_tiles), 0, "No tiles under s/0/")
+        self.assertGreater(len(s1_tiles), 0, "No tiles under s/1/")
+
+        # style.json has both sources
+        self.assertIn('world-overview', style_data['sources'])
+        self.assertIn('region-detail', style_data['sources'])
+
+        # sourceFolders map to directories that exist
+        for src_id, folder in style_data['metadata']['smp:sourceFolders'].items():
+            matching = [n for n in names if n.startswith(folder + '/')]
+            self.assertGreater(len(matching), 0,
+                               f"No entries under {folder} for source {src_id}")
+
+    def test_tile_counts_match_source_plans(self):
+        """Tile counts under s/0/ and s/1/ should match source plan totals."""
+        gen = SMPGenerator()
+        import json, zipfile
+
+        # Build a real export plan to get accurate tile counts
+        gen._get_bounds_wgs84 = lambda ext: [
+            ext.xMinimum(), ext.yMinimum(), ext.xMaximum(), ext.yMaximum()
+        ]
+        plan = gen._build_export_plan(
+            _FakeRectangle(-1, -1, 1, 1), 0, 2,
+            include_world_base_zooms=True, world_max_zoom=3
+        )
+
+        world_plan = plan['sources'][0]
+        region_plan = plan['sources'][1]
+
+        tiles_dir = os.path.join(self.tmp, 'tiles')
+
+        # Create tiles for both sources
+        for sp in plan['sources']:
+            for zoom, min_x, max_x, min_y, max_y, _, si in sp['tiles_by_zoom']:
+                for x in range(min_x, max_x + 1):
+                    for y in range(min_y, max_y + 1):
+                        d = os.path.join(tiles_dir, str(si), str(zoom), str(x))
+                        os.makedirs(d, exist_ok=True)
+                        with open(os.path.join(d, f'{y}.png'), 'wb') as f:
+                            f.write(b'\x89PNG\r\n\x1a\n')
+
+        style = {
+            "version": 8,
+            "sources": {
+                "world-overview": {
+                    "type": "raster", "format": "png",
+                    "minzoom": 0, "maxzoom": 3,
+                    "bounds": [-180, -85.0511, 180, 85.0511],
+                    "tiles": ["smp://maps.v1/s/0/{z}/{x}/{y}.png"]
+                },
+                "region-detail": {
+                    "type": "raster", "format": "png",
+                    "minzoom": 0, "maxzoom": 2,
+                    "bounds": [-1, -1, 1, 1],
+                    "tiles": ["smp://maps.v1/s/1/{z}/{x}/{y}.png"]
+                }
+            },
+            "layers": [
+                {"id": "background", "type": "background",
+                 "paint": {"background-color": "white"}},
+                {"id": "world-raster", "type": "raster", "source": "world-overview"},
+                {"id": "region-raster", "type": "raster", "source": "region-detail"}
+            ],
+            "metadata": {
+                "smp:bounds": [-1, -1, 1, 1],
+                "smp:maxzoom": 2,
+                "smp:sourceFolders": {
+                    "world-overview": "s/0",
+                    "region-detail": "s/1"
+                }
+            },
+            "center": [0, 0],
+            "zoom": 5
+        }
+
+        style_path = os.path.join(self.tmp, 'style_plan.json')
+        with open(style_path, 'w') as f:
+            json.dump(style, f)
+
+        out_path = os.path.join(self.tmp, 'counts.smp')
+        gen._build_smp_archive(
+            style_path=style_path,
+            tiles_dir=tiles_dir,
+            output_path=out_path
+        )
+
+        with zipfile.ZipFile(out_path) as zf:
+            names = zf.namelist()
+
+        s0_count = len([n for n in names if n.startswith('s/0/') and n.endswith('.png')])
+        s1_count = len([n for n in names if n.startswith('s/1/') and n.endswith('.png')])
+
+        self.assertEqual(s0_count, world_plan['total_tiles'],
+                         f"s/0/ tile count {s0_count} != world plan total {world_plan['total_tiles']}")
+        self.assertEqual(s1_count, region_plan['total_tiles'],
+                         f"s/1/ tile count {s1_count} != region plan total {region_plan['total_tiles']}")
+
+
+class TestDedupWithOverlappingZooms(unittest.TestCase):
+    """Dedup must not collapse cross-source tiles even when content is identical."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_both_source_entries_present_with_identical_content(self):
+        """When world and region share overlapping zooms with identical tile content,
+        both s/0/ and s/1/ entries must exist in archive."""
+        gen = SMPGenerator()
+        import json
+
+        style_path = os.path.join(self.tmp, 'style.json')
+        with open(style_path, 'w') as f:
+            json.dump({"version": 8, "sources": {}, "layers": []}, f)
+
+        tiles_dir = os.path.join(self.tmp, 'tiles')
+        identical_content = b'\x89PNG\r\n\x1a\n' + b'\x00' * 100
+
+        # Same tile coordinate (0, 0, 0) in both source 0 and source 1
+        for source_idx in [0, 1]:
+            d = os.path.join(tiles_dir, str(source_idx), '0', '0')
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, '0.png'), 'wb') as f:
+                f.write(identical_content)
+
+        out_path = os.path.join(self.tmp, 'overlap.smp')
+        gen._build_smp_archive(
+            style_path=style_path,
+            tiles_dir=tiles_dir,
+            output_path=out_path,
+            dedup=True
+        )
+
+        import zipfile
+        with zipfile.ZipFile(out_path) as zf:
+            names = set(zf.namelist())
+
+        # Both entries must exist despite identical content
+        self.assertIn('s/0/0/0/0.png', names)
+        self.assertIn('s/1/0/0/0.png', names)
+
+
+class TestWorldBackwardCompatDisabled(unittest.TestCase):
+    """When world tiles disabled, output must be identical to current behavior."""
+
+    def setUp(self):
+        self.gen = SMPGenerator()
+        self.gen._get_bounds_wgs84 = lambda ext: [
+            ext.xMinimum(), ext.yMinimum(), ext.xMaximum(), ext.yMaximum()
+        ]
+
+    def test_single_source_named_mbtiles_source(self):
+        plan = self.gen._build_export_plan(
+            _FakeRectangle(-1, -1, 1, 1), 5, 10,
+            include_world_base_zooms=False
+        )
+        self.assertEqual(plan['sources'][0]['source_id'], 'mbtiles-source')
+
+    def test_style_single_source(self):
+        self.gen._get_bounds_wgs84 = MagicMock(return_value=[-1, -1, 1, 1])
+        style = self.gen._create_style_from_canvas(
+            _FakeRectangle(-1, -1, 1, 1), 5, 10, 'PNG'
+        )
+        source_ids = list(style['sources'].keys())
+        self.assertEqual(len(source_ids), 1)
+        self.assertEqual(source_ids[0], 'mbtiles-source')
+        self.assertEqual(
+            style['metadata']['smp:sourceFolders']['mbtiles-source'], 's/0'
+        )
+
+    def test_tiles_by_zoom_six_tuples_when_disabled(self):
+        """When world disabled, tiles_by_zoom tuples still have 7 elements (source_index=0)."""
+        plan = self.gen._build_export_plan(
+            _FakeRectangle(-1, -1, 1, 1), 5, 10,
+            include_world_base_zooms=False
+        )
+        for t in plan['tiles_by_zoom']:
+            self.assertEqual(len(t), 7)
+            self.assertEqual(t[6], 0)
+
+
+class TestGenerateSmpOrchestrationMultiSource(unittest.TestCase):
+    """End-to-end orchestration tests for multi-source SMP generation."""
+
+    def _patched_gen(self):
+        gen = SMPGenerator()
+        gen.validate_tile_count = MagicMock(return_value=(1, None))
+        gen.validate_extent_size = MagicMock(return_value=None)
+        gen.validate_disk_space = MagicMock()
+        gen._get_bounds_wgs84 = MagicMock(return_value=[-1, -1, 1, 1])
+        gen._create_style_from_canvas = MagicMock(return_value={"version": 8})
+        gen._generate_tiles_from_canvas = MagicMock()
+        gen._build_smp_archive = MagicMock()
+        return gen
+
+    def test_tiles_dir_is_style_dir_not_subdir(self):
+        """tiles_dir should be the style_dir (s/), not style_dir + '/0'."""
+        gen = self._patched_gen()
+        extent = _FakeRectangle(-1, -1, 1, 1)
+
+        temp_root = tempfile.mkdtemp()
+        try:
+            with patch('tempfile.mkdtemp', return_value=temp_root):
+                gen.generate_smp_from_canvas(
+                    extent, 0, 1, '/tmp/test.smp'
+                )
+        finally:
+            shutil.rmtree(temp_root, ignore_errors=True)
+
+        # tiles_dir should be style_dir (s/), not style_dir/0
+        call_args = gen._generate_tiles_from_canvas.call_args
+        tiles_dir_arg = call_args[0][3]
+        self.assertTrue(
+            tiles_dir_arg.endswith('/s'),
+            f"tiles_dir should end with /s, got {tiles_dir_arg}"
+        )
+        self.assertFalse(
+            tiles_dir_arg.endswith('/s/0'),
+            f"tiles_dir should NOT end with /s/0, got {tiles_dir_arg}"
+        )
+
+
+class TestCancellationMidSource(unittest.TestCase):
+    """Cancellation between sources: resume must skip cached source 0, re-render source 1."""
+
+    def setUp(self):
+        self.gen = SMPGenerator()
+        self.gen._get_bounds_wgs84 = lambda ext: [
+            ext.xMinimum(), ext.yMinimum(), ext.xMaximum(), ext.yMaximum()
+        ]
+
+    def test_resume_skips_cached_source_zero(self):
+        """After cancel between sources, resume reuses source 0 tiles from cache."""
+        import tempfile, shutil, json, zipfile
+        from unittest.mock import MagicMock, patch
+
+        tmp = tempfile.mkdtemp()
+        try:
+            # Build an export plan with 2 sources (world enabled)
+            plan = self.gen._build_export_plan(
+                _FakeRectangle(-1, -1, 1, 1), 0, 2,
+                include_world_base_zooms=True, world_max_zoom=3
+            )
+            self.assertEqual(len(plan['sources']), 2)
+
+            # Source 0 tiles (world, zooms 0-3)
+            world_tiles = [t for t in plan['tiles_by_zoom'] if t[6] == 0]
+            # Source 1 tiles (region, zooms 0-2)
+            region_tiles = [t for t in plan['tiles_by_zoom'] if t[6] == 1]
+
+            tiles_dir = os.path.join(tmp, 'tiles')
+
+            # Pre-create source 0 tiles (simulating they were rendered before cancel)
+            for zoom, min_x, max_x, min_y, max_y, num_tiles, source_index in world_tiles:
+                for x in range(min_x, max_x + 1):
+                    for y in range(min_y, max_y + 1):
+                        d = os.path.join(tiles_dir, str(source_index), str(zoom), str(x))
+                        os.makedirs(d, exist_ok=True)
+                        with open(os.path.join(d, f'{y}.png'), 'wb') as f:
+                            f.write(b'\x89PNG\r\n\x1a\n')
+
+            # Verify source 0 tiles exist on disk
+            s0_files = []
+            for root, dirs, files in os.walk(tiles_dir):
+                for fn in files:
+                    s0_files.append(os.path.join(root, fn))
+            self.assertGreater(len(s0_files), 0, 'Source 0 tiles should exist')
+
+            # Source 1 tiles should NOT exist yet (not rendered before cancel)
+            s1_dir = os.path.join(tiles_dir, '1')
+            self.assertFalse(os.path.exists(s1_dir),
+                             'Source 1 tiles should not exist before resume')
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == '__main__':

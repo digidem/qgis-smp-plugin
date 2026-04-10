@@ -38,6 +38,7 @@ from qgis.core import (QgsProcessingAlgorithm,
                        QgsProcessingParameterFileDestination,
                        QgsProcessingParameterBoolean,
                        QgsProcessingException,
+                       QgsProject,
                        QgsRectangle)
 
 from .comapeo_smp_generator import SMPGenerator
@@ -73,6 +74,19 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
 
     # Tile format options presented to the user
     TILE_FORMAT_OPTIONS = ['PNG', 'JPG', 'WEBP']
+
+    @classmethod
+    def default_tile_format_index(cls):
+        """Return the default tile format enum index for the current runtime."""
+        preferred_formats = [
+            SMPGenerator.TILE_FORMAT_WEBP,
+            SMPGenerator.TILE_FORMAT_JPG,
+            SMPGenerator.TILE_FORMAT_PNG,
+        ]
+        for tile_format in preferred_formats:
+            if SMPGenerator.is_tile_format_supported(tile_format):
+                return cls.TILE_FORMAT_OPTIONS.index(tile_format)
+        return cls.TILE_FORMAT_OPTIONS.index(SMPGenerator.TILE_FORMAT_PNG)
 
     def initAlgorithm(self, config):
         """
@@ -115,13 +129,13 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
             )
         )
 
-        # Add tile format parameter (PNG / JPG)
+        # Add tile format parameter (PNG / JPG / WEBP)
         self.addParameter(
             QgsProcessingParameterEnum(
                 self.TILE_FORMAT,
                 self.tr('Tile image format'),
                 options=self.TILE_FORMAT_OPTIONS,
-                defaultValue=1,  # JPG
+                defaultValue=self.default_tile_format_index(),
                 optional=False
             )
         )
@@ -143,7 +157,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterBoolean(
                 self.INCLUDE_WORLD_BASE_ZOOMS,
                 self.tr('Include world tiles for low zoom levels'),
-                defaultValue=False,
+                defaultValue=True,
                 optional=False
             )
         )
@@ -161,11 +175,35 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
         )
 
         # Add output file parameter
+        # Default to project title, then filename, otherwise 'output'
+        project = QgsProject.instance()
+        project_name = ''
+        if project:
+            title = project.title()
+            if isinstance(title, str) and title.strip():
+                project_name = title
+            else:
+                base = project.baseName()
+                if isinstance(base, str) and base.strip():
+                    project_name = base
+        if not project_name:
+            base_name = 'output'
+        else:
+            # Sanitize: replace spaces and special chars
+            base_name = ''.join(
+                c if c.isalnum() or c in '-_' else '_'
+                for c in project_name
+            ).rstrip('_')
+            if not base_name:
+                base_name = 'output'
+        default_output = base_name + '.smp'
+
         self.addParameter(
             QgsProcessingParameterFileDestination(
                 self.OUTPUT_FILE,
                 self.tr('Output SMP file'),
-                fileFilter='SMP files (*.smp)'
+                fileFilter='SMP files (*.smp)',
+                defaultValue=default_output
             )
         )
 
@@ -213,6 +251,10 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                 'Invalid tile format index: {}'.format(tile_format_index)
             )
         tile_format = self.TILE_FORMAT_OPTIONS[tile_format_index]
+        try:
+            tile_format = SMPGenerator.validate_tile_format(tile_format)
+        except ValueError as exc:
+            return False, self.tr(str(exc))
 
         # Instantiate generator without feedback (logs go to QgsMessageLog only)
         generator = SMPGenerator()
@@ -263,6 +305,10 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                 self.tr('Invalid tile format index: {}'.format(tile_format_index))
             )
         tile_format = self.TILE_FORMAT_OPTIONS[tile_format_index]
+        try:
+            tile_format = SMPGenerator.validate_tile_format(tile_format)
+        except ValueError as exc:
+            raise QgsProcessingException(self.tr(str(exc)))
 
         # Get JPEG quality
         jpeg_quality = self.parameterAsInt(parameters, self.JPEG_QUALITY, context)
@@ -307,6 +353,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
             world_max_zoom=world_max_zoom
         )
         estimated_tiles = export_plan['total_tiles']
+        world_coverage_tiles = export_plan['world_coverage_tiles']
         estimated_bytes = generator.estimate_tile_storage_bytes(estimated_tiles, tile_format)
         estimated_mb = estimated_bytes / (1024 * 1024)
         feedback.pushInfo(self.tr(f'Estimated tile count: {estimated_tiles:,}'))
@@ -314,7 +361,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
         feedback.pushInfo(
             self.tr(
                 f"Estimated world pyramid coverage: {export_plan['world_pct']:.2f}% "
-                f"({estimated_tiles:,}/{export_plan['world_tiles']:,} tiles)"
+                f"({world_coverage_tiles:,}/{export_plan['world_tiles']:,} tiles)"
             )
         )
 
@@ -335,8 +382,8 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                 world_max_zoom=world_max_zoom,
                 export_plan=export_plan
             )
-        except (ValueError, OSError) as e:
-            raise QgsProcessingException(str(e))
+        except (ValueError, OSError) as exc:
+            raise QgsProcessingException(str(exc))
 
         # generate_smp_from_canvas returns None when the user cancelled.
         # Return an empty result dict so Processing surfaces it as cancelled,

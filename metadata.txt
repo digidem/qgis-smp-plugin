@@ -6,7 +6,7 @@
 name=CoMapeo Map Builder
 qgisMinimumVersion=3.0
 description=Generates SMP files for CoMapeo using proper XYZ Web Mercator tiling
-version=0.6.0
+version=0.7.0
 author=Awana Digital
 email=luandro@awana.digital
 
@@ -20,6 +20,13 @@ repository=https://github.com/digidem/qgis-smp-plugin
 
 hasProcessingProvider=yes
 changelog=
+    0.7.0 - Multi-source worlds, project-named styles & tile format validation
+    * Separate world tiles into distinct SMP source for proper multi-source support
+    * Add missing multi-source tests and fix fixture paths
+    * Update default parameter values in Processing dialog for better out-of-box experience
+    * Add runtime-aware tile format validation with accurate world coverage checks
+    * Use QGIS project title as Mapbox GL style name for identifiable exports
+    * Fall back to project filename when title metadata is empty
     0.6.0 - Dedup hardening & test coverage
     * Fix dedup cancellation: Phase 1 and Phase 2 now return False and clean up partial files
     * Add ZIP32 entry-count guard (archive fails fast if >65533 tiles)
