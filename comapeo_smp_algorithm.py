@@ -30,7 +30,9 @@ __copyright__ = '(C) 2025 by Awana Digital'
 
 __revision__ = '$Format:%H$'
 
-from qgis.PyQt.QtCore import QCoreApplication
+import os
+
+from qgis.PyQt.QtCore import QCoreApplication, QStandardPaths
 from qgis.core import (QgsProcessingAlgorithm,
                        QgsProcessingParameterExtent,
                        QgsProcessingParameterNumber,
@@ -196,7 +198,16 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
             ).rstrip('_')
             if not base_name:
                 base_name = 'output'
-        default_output = base_name + '.smp'
+
+        # Prefer project directory; fall back to OS Documents folder
+        project_path = QgsProject.instance().fileName()
+        if project_path:
+            default_dir = os.path.dirname(project_path)
+        else:
+            default_dir = QStandardPaths.writableLocation(
+                QStandardPaths.DocumentsLocation
+            )
+        default_output = os.path.join(default_dir, base_name + '.smp')
 
         self.addParameter(
             QgsProcessingParameterFileDestination(

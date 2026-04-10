@@ -27,6 +27,7 @@ changelog=
     * Add runtime-aware tile format validation with accurate world coverage checks
     * Use QGIS project title as Mapbox GL style name for identifiable exports
     * Fall back to project filename when title metadata is empty
+    * Default output path now uses project directory (saved) or OS Documents folder (unsaved)
     0.6.0 - Dedup hardening & test coverage
     * Fix dedup cancellation: Phase 1 and Phase 2 now return False and clean up partial files
     * Add ZIP32 entry-count guard (archive fails fast if >65533 tiles)

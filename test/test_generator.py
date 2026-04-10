@@ -60,6 +60,9 @@ class _FakeProject:
     def baseName(self):
         return ''
 
+    def fileName(self):
+        return ''
+
     def crs(self):
         return _FakeCrs()
 
@@ -110,6 +113,9 @@ qgis_core_mock.QgsMapSettings = MagicMock()
 qgis_core_mock.QgsMapRendererCustomPainterJob = MagicMock()
 
 pyqt_core_mock = MagicMock()
+pyqt_core_mock.QStandardPaths = MagicMock()
+pyqt_core_mock.QStandardPaths.writableLocation = MagicMock(return_value='/home/user/Documents')
+pyqt_core_mock.QStandardPaths.DocumentsLocation = 1
 pyqt_gui_mock = MagicMock()
 pyqt_gui_mock.QImageWriter.supportedImageFormats.return_value = [b'png', b'jpeg', b'webp']
 
@@ -1973,6 +1979,9 @@ class TestCheckParameterValues(unittest.TestCase):
         pyqt_core = sys.modules['qgis.PyQt.QtCore']
         pyqt_core.QCoreApplication = MagicMock()
         pyqt_core.QCoreApplication.translate = MagicMock(side_effect=lambda ctx, s: s)
+        pyqt_core.QStandardPaths = MagicMock()
+        pyqt_core.QStandardPaths.writableLocation = MagicMock(return_value='/home/user/Documents')
+        pyqt_core.QStandardPaths.DocumentsLocation = 1
 
         ns = {'__name__': 'comapeo_smp_algorithm', '__package__': 'comapeo_smp_plugin'}
         exec(compile(src, algo_path, 'exec'), ns)  # noqa: S102
@@ -2236,6 +2245,68 @@ class TestCheckParameterValues(unittest.TestCase):
         )
         self.assertIn('(85/1,365 tiles)', coverage_message)
         self.assertNotIn('(200/1,365 tiles)', coverage_message)
+
+    def test_init_algorithm_default_output_uses_project_dir_when_project_open(self):
+        """When a project file is open, the default output path should sit next to it."""
+        algo = self._make_algorithm()
+        algo.addParameter = MagicMock()
+
+        file_dest_ctor = algo.initAlgorithm.__globals__['QgsProcessingParameterFileDestination']
+        file_dest_ctor.reset_mock()
+
+        project_file = '/home/user/myproject/project.qgz'
+        project_mock = MagicMock()
+        project_mock.title.return_value = ''
+        project_mock.baseName.return_value = ''
+        project_mock.fileName.return_value = project_file
+
+        project_class_mock = MagicMock()
+        project_class_mock.instance.return_value = project_mock
+
+        algo.initAlgorithm.__globals__['QgsProject'] = project_class_mock
+        try:
+            algo.initAlgorithm({})
+        finally:
+            algo.initAlgorithm.__globals__['QgsProject'] = _FakeProject
+
+        output_calls = [
+            call for call in file_dest_ctor.call_args_list
+            if call.args and call.args[0] == algo.OUTPUT_FILE
+        ]
+        self.assertEqual(len(output_calls), 1)
+        default_value = output_calls[0].kwargs.get('defaultValue')
+        self.assertEqual(default_value, '/home/user/myproject/output.smp')
+
+    def test_init_algorithm_default_output_uses_documents_when_no_project(self):
+        """When no project is open, the default output path should fall back to Documents."""
+        algo = self._make_algorithm()
+        algo.addParameter = MagicMock()
+
+        file_dest_ctor = algo.initAlgorithm.__globals__['QgsProcessingParameterFileDestination']
+        file_dest_ctor.reset_mock()
+
+        project_mock = MagicMock()
+        project_mock.title.return_value = ''
+        project_mock.baseName.return_value = ''
+        project_mock.fileName.return_value = ''
+
+        project_class_mock = MagicMock()
+        project_class_mock.instance.return_value = project_mock
+
+        algo.initAlgorithm.__globals__['QgsProject'] = project_class_mock
+        try:
+            algo.initAlgorithm({})
+        finally:
+            algo.initAlgorithm.__globals__['QgsProject'] = _FakeProject
+
+        output_calls = [
+            call for call in file_dest_ctor.call_args_list
+            if call.args and call.args[0] == algo.OUTPUT_FILE
+        ]
+        self.assertEqual(len(output_calls), 1)
+        default_value = output_calls[0].kwargs.get('defaultValue')
+        # QStandardPaths.writableLocation is mocked to return '/home/user/Documents'
+        self.assertEqual(default_value, '/home/user/Documents/output.smp')
 
 
 class TestPluginLifecycle(unittest.TestCase):
