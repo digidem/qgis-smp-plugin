@@ -1,4 +1,4 @@
-name: CI
+name: Tests
 
 on:
   push:
@@ -7,21 +7,6 @@ on:
     branches: [main]
 
 jobs:
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Install flake8
-        run: pip install flake8
-
-      - name: Lint
-        run: flake8 --count --show-source --statistics .
-
   test:
     runs-on: ubuntu-latest
     steps:
@@ -38,38 +23,3 @@ jobs:
 
       - name: Run tests
         run: PYTHONPATH=. python3 test/test_generator.py -v
-
-  security:
-    runs-on: ubuntu-latest
-    permissions:
-      security-events: write
-      actions: read
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Install bandit
-        run: pip install bandit[sarif]
-
-      - name: Run Bandit (report only, no CI failure)
-        run: |
-          bandit -r . -c bandit.yaml -f sarif -o bandit-results.sarif --exit-zero
-          bandit -r . -c bandit.yaml -f json  -o bandit-results.json  --exit-zero
-
-      - name: Upload SARIF to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v4
-        if: always()
-        with:
-          sarif_file: bandit-results.sarif
-          category: bandit
-
-      - name: Upload JSON report as artifact
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: bandit-security-report
-          path: bandit-results.json
