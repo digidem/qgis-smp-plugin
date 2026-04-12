@@ -58,8 +58,8 @@ produce vector tiles, glyphs, or sprite assets.
    - **Extent**: The geographic area to include in the SMP file
    - **Minimum zoom level**: The minimum zoom level to include (0-24)
    - **Maximum zoom level**: The maximum zoom level to include (0-24)
-   - **Tile image format**: PNG or JPG format for the generated tiles
-   - **JPEG quality**: Compression quality for JPG tiles (1-100)
+   - **Tile image format**: PNG, JPG, or WebP format for the generated tiles
+   - **JPEG/WebP quality**: Compression quality for JPG/WebP tiles (1-100)
    - **Include world tiles for low zoom levels**: Adds global base tiles to avoid blank map areas when zoomed out
    - **World low-zoom coverage (3-5)**: When enabled, world tiles are generated from zoom 0 up to this zoom
    - **Output SMP file**: The location to save the SMP file
