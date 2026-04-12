@@ -4893,5 +4893,116 @@ class TestCancellationMidSource(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestMultiSourceLogging(unittest.TestCase):
+    """Tests for per-source logging in _generate_tiles_from_canvas."""
+
+    def _run_with_plan(self, plan, max_workers=1):
+        """Helper: run _generate_tiles_from_canvas with a given export_plan and capture logs."""
+        gen = SMPGenerator()
+        feedback = MagicMock()
+        feedback.isCanceled.return_value = False
+        gen.feedback = feedback
+        gen._calculate_tile_extent = MagicMock(return_value=MagicMock())
+
+        import comapeo_smp_generator as _mod
+        fake_img = MagicMock()
+        fake_img.save = MagicMock()
+
+        tmp = tempfile.mkdtemp()
+        try:
+            with patch.object(_mod, 'QgsMapSettings', MagicMock()), \
+                 patch.object(_mod, 'QgsProject', _FakeProject), \
+                 patch('comapeo_smp_generator.QImage', return_value=fake_img), \
+                 patch('comapeo_smp_generator.QPainter', MagicMock()), \
+                 patch('comapeo_smp_generator.QgsMapRendererCustomPainterJob', MagicMock()):
+                gen._generate_tiles_from_canvas(
+                    _FakeRectangle(0, 0, 1, 1), 0, 0, tmp,
+                    tile_format='PNG',
+                    export_plan=plan,
+                    max_workers=max_workers,
+                )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        pushed = [call.args[0] for call in feedback.pushInfo.call_args_list]
+        return pushed
+
+    def test_per_source_tile_counts_logged_when_multiple_sources(self):
+        """When multiple sources exist, per-source tile counts should be logged."""
+        plan = {
+            'total_tiles': 2,
+            'tiles_by_zoom': [
+                (0, 0, 0, 0, 0, 1, 0),   # source 0: 1 tile
+                (5, 16, 16, 16, 16, 1, 1),  # source 1: 1 tile
+            ],
+        }
+        pushed = self._run_with_plan(plan)
+
+        self.assertTrue(
+            any("World overview tiles: 1 (source 0)" in m for m in pushed),
+            f"Expected per-source count for source 0. Got: {pushed}"
+        )
+        self.assertTrue(
+            any("Region detail tiles: 1 (source 1)" in m for m in pushed),
+            f"Expected per-source count for source 1. Got: {pushed}"
+        )
+
+    def test_source_transition_message_logged(self):
+        """When source_index changes mid-iteration, a transition message is logged."""
+        plan = {
+            'total_tiles': 2,
+            'tiles_by_zoom': [
+                (0, 0, 0, 0, 0, 1, 0),
+                (5, 16, 16, 16, 16, 1, 1),
+            ],
+        }
+        pushed = self._run_with_plan(plan)
+
+        self.assertTrue(
+            any("Completed world overview tiles, starting region detail tiles..." in m for m in pushed),
+            f"Expected source transition message. Got: {pushed}"
+        )
+
+    def test_source_phase_completion_logged_when_last_tile_finishes(self):
+        """When the last tile of a source completes, a phase completion message is logged."""
+        plan = {
+            'total_tiles': 2,
+            'tiles_by_zoom': [
+                (0, 0, 0, 0, 0, 1, 0),
+                (5, 16, 16, 16, 16, 1, 1),
+            ],
+        }
+        pushed = self._run_with_plan(plan, max_workers=1)
+
+        self.assertTrue(
+            any("Completed world overview tiles (1/2 total)" in m for m in pushed),
+            f"Expected source phase completion message. Got: {pushed}"
+        )
+
+    def test_single_source_no_extra_logging(self):
+        """With a single source, no per-source count or transition messages.
+
+        Note: source phase completion (e.g. 'Completed world overview tiles
+        (1/1 total)') IS logged even for single sources because the code
+        does not guard that log on multi-source.
+        """
+        plan = {
+            'total_tiles': 1,
+            'tiles_by_zoom': [
+                (0, 0, 0, 0, 0, 1, 0),
+            ],
+        }
+        pushed = self._run_with_plan(plan)
+
+        self.assertFalse(
+            any("World overview tiles:" in m for m in pushed),
+            f"Single source should not log per-source counts. Got: {pushed}"
+        )
+        self.assertFalse(
+            any("Completed world overview tiles, starting" in m for m in pushed),
+            f"Single source should not log source transitions. Got: {pushed}"
+        )
+
+
 if __name__ == '__main__':
     unittest.main()

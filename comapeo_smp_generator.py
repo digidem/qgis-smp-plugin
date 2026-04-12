@@ -1287,6 +1287,16 @@ class SMPGenerator:
                 f"({max_x - min_x + 1}x{max_y - min_y + 1})"
             )
 
+        # Log per-source tile counts when multiple sources are present
+        source_tile_counts = {}
+        for _z, _mx, _Mx, _my, _My, num_tiles, source_index in tiles_by_zoom:
+            source_tile_counts[source_index] = source_tile_counts.get(source_index, 0) + num_tiles
+        if len(source_tile_counts) > 1:
+            source_labels = {0: "World overview", 1: "Region detail"}
+            for si in sorted(source_tile_counts):
+                label = source_labels.get(si, f"Source {si}")
+                self.log(f"{label} tiles: {source_tile_counts[si]} (source {si})")
+
         tiles_completed = 0
         last_reported_pct = -1
         progress_lock = threading.Lock()
@@ -1300,8 +1310,16 @@ class SMPGenerator:
         if self.feedback and total_tiles > 0:
             self.feedback.setProgress(0)
 
+        source_labels = {0: "World overview", 1: "Region detail"}
+        _current_source = [None]
+
         def iter_tile_tasks():
             for zoom, min_x, max_x, min_y, max_y, _, source_index in tiles_by_zoom:
+                if _current_source[0] is not None and source_index != _current_source[0]:
+                    prev_label = source_labels.get(_current_source[0], f"Source {_current_source[0]}")
+                    next_label = source_labels.get(source_index, f"Source {source_index}")
+                    self.log(f"Completed {prev_label.lower()} tiles, starting {next_label.lower()} tiles...")
+                _current_source[0] = source_index
                 for x in range(min_x, max_x + 1):
                     for y in range(min_y, max_y + 1):
                         yield (zoom, x, y, source_index)
@@ -1358,7 +1376,7 @@ class SMPGenerator:
                     continue
 
                 for future in done:
-                    futures.pop(future, None)
+                    _done_tile = futures.pop(future, None)
                     future.result()
                     with progress_lock:
                         tiles_completed += 1
@@ -1374,6 +1392,14 @@ class SMPGenerator:
                             if new_pct != last_reported_pct:
                                 self.feedback.setProgress(new_pct)
                                 last_reported_pct = new_pct
+
+                        # Log when a source phase finishes
+                        if _done_tile is not None:
+                            _done_source = _done_tile[3]
+                            _remaining_sources = {v[3] for v in futures.values()}
+                            if _done_source not in _remaining_sources:
+                                _label = source_labels.get(_done_source, f"Source {_done_source}")
+                                self.log(f"Completed {_label.lower()} tiles ({tiles_completed}/{total_tiles} total)")
 
                 if cancel_event.is_set():
                     break

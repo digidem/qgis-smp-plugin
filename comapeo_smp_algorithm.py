@@ -40,8 +40,7 @@ from qgis.core import (QgsProcessingAlgorithm,
                        QgsProcessingParameterFileDestination,
                        QgsProcessingParameterBoolean,
                        QgsProcessingException,
-                       QgsProject,
-                       QgsRectangle)
+                       QgsProject)
 
 from .comapeo_smp_generator import SMPGenerator
 
@@ -376,18 +375,10 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
             )
         )
 
-        # Create a rectangle from the extent
-        rect = QgsRectangle(
-            extent.xMinimum(),
-            extent.yMinimum(),
-            extent.xMaximum(),
-            extent.yMaximum()
-        )
-
         # Generate the SMP file
         try:
             output_path = generator.generate_smp_from_canvas(
-                rect, min_zoom, max_zoom, output_file,
+                extent, min_zoom, max_zoom, output_file,
                 tile_format=tile_format, jpeg_quality=jpeg_quality,
                 include_world_base_zooms=include_world_base_zooms,
                 world_max_zoom=world_max_zoom,
