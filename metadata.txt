@@ -6,7 +6,7 @@
 name=CoMapeo Map Builder
 qgisMinimumVersion=3.0
 description=Generates SMP files for CoMapeo using proper XYZ Web Mercator tiling
-version=0.7.0
+version=0.7.1
 author=Awana Digital
 email=luandro@awana.digital
 
@@ -20,6 +20,16 @@ repository=https://github.com/digidem/qgis-smp-plugin
 
 hasProcessingProvider=yes
 changelog=
+    0.7.1 - UX improvements, CI hardening & docs updates
+    * Default output path now uses project directory (saved) or OS Documents folder (unsaved)
+    * Add multi-source progress logging for better feedback during generation
+    * Update README to document WebP tile format option
+    * Add flake8 linting with pre-commit hook and CI check
+    * Add bandit security scanning with SARIF reporting
+    * Refactor CI into separate lint, test, and security workflows
+    * Fix release zip via gitattributes to exclude dev files
+    * Bump GitHub Actions to latest major versions
+    * Remove dead Makefile targets and stale configs
     0.7.0 - Multi-source worlds, project-named styles & tile format validation
     * Separate world tiles into distinct SMP source for proper multi-source support
     * Add missing multi-source tests and fix fixture paths
