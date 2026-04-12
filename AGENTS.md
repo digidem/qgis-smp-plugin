@@ -21,7 +21,7 @@ Operational instructions for coding agents working in this repository.
   without first checking the file lists; current legacy targets can omit core
   runtime modules.
 - Do not run deployment or destructive make targets unless explicitly requested: `make deploy`, `make dclean`, `make derase`, `make zip`, `make upload`.
-- Do not bump `metadata.txt` version or add a changelog entry unless the user explicitly asked for a release/version change. Every push to `main` triggers the release workflow — bumping the version is the release act itself.
+- Do not bump `metadata.txt` version or add a changelog entry unless the user explicitly asked for a release/version change. Publishing a GitHub Release is the act that triggers the release workflow — bumping the version prepares for it but does not release on its own.
 - Do not rewrite large plugin-builder header blocks unless needed for the task.
 
 ## Release Process
@@ -52,11 +52,12 @@ builds the plugin zip via `git archive`, and attaches it to the release.
    git push
    ```
 
-4. **Create the GitHub Release** at
-   `https://github.com/digidem/qgis-smp-plugin/releases/new`:
+4. **Create the GitHub Release** (web or CLI):
+   - Web: go to `https://github.com/digidem/qgis-smp-plugin/releases/new`
+   - CLI: `unset GITHUB_TOKEN && gh release create vX.Y.Z --title "Release vX.Y.Z" --notes "$(awk ...)"`
    - Tag: `vX.Y.Z` (must exactly match `v` + version in `metadata.txt`)
    - Title: `Release vX.Y.Z`
-   - Click **Publish release**
+   - Click **Publish release** (web) or the CLI publishes immediately
 
 5. The workflow fires automatically: validates the tag, extracts the changelog
    as the release body, builds `comapeo_smp_vX.Y.Z.zip` via `git archive`,

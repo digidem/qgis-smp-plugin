@@ -18,7 +18,7 @@ Thank you for your interest in contributing to the CoMapeo SMP Plugin! This docu
 3. Enable the plugin in QGIS:
    - Open QGIS
    - Go to `Plugins` > `Manage and Install Plugins...`
-   - Find and enable "CoMapeo SMP" in the `Installed` tab
+   - Find and enable "CoMapeo Map Builder" in the `Installed` tab
 
 ## Making Changes
 
@@ -71,10 +71,10 @@ We use semantic versioning (MAJOR.MINOR.PATCH):
 ## Release Process
 
 1. Update the version number in `metadata.txt`
-2. Update the changelog in `metadata.txt` if applicable
-3. Commit the changes
-4. Push to the main branch
-5. GitHub Actions will automatically create a new release
+2. Update the changelog in `metadata.txt`
+3. Commit and push to the main branch
+4. Create a GitHub Release with tag `vX.Y.Z` (matching the version in `metadata.txt`)
+5. The release workflow will automatically build the plugin zip and attach it to the release
 
 ## Questions?
 
