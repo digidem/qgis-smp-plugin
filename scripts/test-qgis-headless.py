@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """
 Headless QGIS integration test for the CoMapeo SMP plugin.
 
@@ -113,54 +113,93 @@ try:
     check("Style version 8", style['version'] == 8)
     check("PNG tiles URL", '.png' in src['tiles'][0])
     check("minzoom=0, maxzoom=10", src['minzoom'] == 0 and src['maxzoom'] == 10)
-    check("sourceFolders = s/0",
-          style['metadata']['smp:sourceFolders'][list(style['sources'].keys())[0]] == 's/0')
+    check("Local-only source folder = s/2",
+          style['metadata']['smp:sourceFolders'][list(style['sources'].keys())[0]] == 's/2')
 
     style_webp = gen._create_style_from_canvas(extent, 0, 10, 'WEBP')
     src_webp = list(style_webp['sources'].values())[0]
     check("WebP format field", src_webp['format'] == 'webp')
     check("WebP tile extension", '.webp' in src_webp['tiles'][0])
 
-    world_plan = gen._build_export_plan(
+    world_local_plan = gen._build_export_plan(
         extent, 6, 12,
         include_world_base_zooms=True, world_max_zoom=3
     )
-    style_world = gen._create_style_from_canvas(
+    style_world_local = gen._create_style_from_canvas(
         extent, 6, 12, 'PNG',
         include_world_base_zooms=True, world_max_zoom=3,
-        source_bounds=world_plan['source_bounds'],
-        source_plans=world_plan['sources']
+        source_bounds=world_local_plan['source_bounds'],
+        source_plans=world_local_plan['sources']
     )
-    world_sources = style_world['sources']
-    check("World style uses two sources",
-          set(world_sources.keys()) == {'world-overview', 'region-detail'},
-          "got {}".format(list(world_sources.keys())))
+    world_local_sources = style_world_local['sources']
+    check("World+Local style uses two sources",
+          set(world_local_sources.keys()) == {'world-overview', 'local-detail'},
+          "got {}".format(list(world_local_sources.keys())))
     check("World overview folder = s/0",
-          style_world['metadata']['smp:sourceFolders'].get('world-overview') == 's/0')
-    check("Region detail folder = s/1",
-          style_world['metadata']['smp:sourceFolders'].get('region-detail') == 's/1')
+          style_world_local['metadata']['smp:sourceFolders'].get('world-overview') == 's/0')
+    check("Local detail folder = s/2",
+          style_world_local['metadata']['smp:sourceFolders'].get('local-detail') == 's/2')
     check("World overview tile path uses s/0 PNG",
-          world_sources['world-overview']['tiles'][0].endswith('s/0/{z}/{x}/{y}.png'))
-    check("Region detail tile path uses s/1 PNG",
-          world_sources['region-detail']['tiles'][0].endswith('s/1/{z}/{x}/{y}.png'))
-    check("World layer order is world then region",
-          [layer['id'] for layer in style_world['layers'][1:3]] == ['world-raster', 'region-raster'])
-    check("World style bounds follow region extent",
-          style_world['metadata']['smp:bounds'] == world_plan['sources'][1]['source_bounds'])
+          world_local_sources['world-overview']['tiles'][0].endswith('s/0/{z}/{x}/{y}.png'))
+    check("Local detail tile path uses s/2 PNG",
+          world_local_sources['local-detail']['tiles'][0].endswith('s/2/{z}/{x}/{y}.png'))
+    check("World+Local layer order is world then local",
+          [layer['id'] for layer in style_world_local['layers'][1:3]] == ['world-raster', 'local-raster'])
+    check("World+Local style bounds follow local extent",
+          style_world_local['metadata']['smp:bounds'] == world_local_plan['sources'][1]['source_bounds'])
+
+    full_plan = gen._build_export_plan(
+        extent, 6, 12,
+        include_world_base_zooms=True,
+        world_max_zoom=3,
+        include_region=True,
+        region_extent=QgsRectangle(extent.xMinimum() - 1, extent.yMinimum() - 1,
+                                  extent.xMaximum() + 1, extent.yMaximum() + 1),
+        region_min_zoom=4,
+        region_max_zoom=5,
+    )
+    style_full = gen._create_style_from_canvas(
+        extent, 6, 12, 'PNG',
+        include_world_base_zooms=True,
+        world_max_zoom=3,
+        source_bounds=full_plan['source_bounds'],
+        source_plans=full_plan['sources']
+    )
+    full_sources = style_full['sources']
+    check("Full style uses three sources",
+          set(full_sources.keys()) == {'world-overview', 'region-detail', 'local-detail'},
+          "got {}".format(list(full_sources.keys())))
+    check("Region detail folder = s/1",
+          style_full['metadata']['smp:sourceFolders'].get('region-detail') == 's/1')
+    check("Full layer order is world then region then local",
+          [layer['id'] for layer in style_full['layers'][1:4]] == ['world-raster', 'region-raster', 'local-raster'])
+    check("Full style bounds follow local extent",
+          style_full['metadata']['smp:bounds'] == full_plan['sources'][2]['source_bounds'])
 
     # ------------------------------------------------------------------
     print("\n--- Multi-Source Archive Roundtrip ---")
 
     roundtrip_plan = gen._build_export_plan(
-        extent, 3, 3,
-        include_world_base_zooms=True, world_max_zoom=3
+        extent, 6, 7,
+        include_world_base_zooms=True,
+        world_max_zoom=3,
+        include_region=True,
+        region_extent=QgsRectangle(extent.xMinimum() - 1, extent.yMinimum() - 1,
+                                  extent.xMaximum() + 1, extent.yMaximum() + 1),
+        region_min_zoom=4,
+        region_max_zoom=5,
     )
     out_roundtrip = os.path.join(tmp, 'world-roundtrip.smp')
     roundtrip_result = gen.generate_smp_from_canvas(
-        extent, 3, 3, out_roundtrip,
+        extent, 6, 7, out_roundtrip,
         tile_format='PNG',
         include_world_base_zooms=True,
         world_max_zoom=3,
+        include_region=True,
+        region_extent=QgsRectangle(extent.xMinimum() - 1, extent.yMinimum() - 1,
+                                  extent.xMaximum() + 1, extent.yMaximum() + 1),
+        region_min_zoom=4,
+        region_max_zoom=5,
         export_plan=roundtrip_plan
     )
     check("PNG roundtrip archive created",
@@ -176,13 +215,19 @@ try:
     roundtrip_s1 = [
         n for n in roundtrip_names if n.startswith('s/1/') and n.endswith('.png')
     ]
+    roundtrip_s2 = [
+        n for n in roundtrip_names if n.startswith('s/2/') and n.endswith('.png')
+    ]
     roundtrip_world = roundtrip_style['sources']['world-overview']
     roundtrip_region = roundtrip_style['sources']['region-detail']
-    check("Roundtrip style has two sources", len(roundtrip_style['sources']) == 2)
+    roundtrip_local = roundtrip_style['sources']['local-detail']
+    check("Roundtrip style has three sources", len(roundtrip_style['sources']) == 3)
     check("Roundtrip style includes world-overview",
           'world-overview' in roundtrip_style['sources'])
     check("Roundtrip style includes region-detail",
           'region-detail' in roundtrip_style['sources'])
+    check("Roundtrip style includes local-detail",
+          'local-detail' in roundtrip_style['sources'])
     check("Roundtrip archive has expected world tile count",
           len(roundtrip_s0) == roundtrip_plan['sources'][0]['total_tiles'],
           "found {} expected {}".format(
@@ -191,18 +236,26 @@ try:
           len(roundtrip_s1) == roundtrip_plan['sources'][1]['total_tiles'],
           "found {} expected {}".format(
               len(roundtrip_s1), roundtrip_plan['sources'][1]['total_tiles']))
+    check("Roundtrip archive has expected local tile count",
+          len(roundtrip_s2) == roundtrip_plan['sources'][2]['total_tiles'],
+          "found {} expected {}".format(
+              len(roundtrip_s2), roundtrip_plan['sources'][2]['total_tiles']))
     check("Roundtrip world source zooms match plan",
           roundtrip_world['minzoom'] == roundtrip_plan['sources'][0]['export_zooms'][0] and
           roundtrip_world['maxzoom'] == roundtrip_plan['sources'][0]['export_zooms'][-1])
     check("Roundtrip region source zooms match plan",
           roundtrip_region['minzoom'] == roundtrip_plan['sources'][1]['export_zooms'][0] and
           roundtrip_region['maxzoom'] == roundtrip_plan['sources'][1]['export_zooms'][-1])
-    check("Roundtrip bounds follow region extent",
-          roundtrip_style['metadata']['smp:bounds'] == roundtrip_plan['sources'][1]['source_bounds'])
+    check("Roundtrip local source zooms match plan",
+          roundtrip_local['minzoom'] == roundtrip_plan['sources'][2]['export_zooms'][0] and
+          roundtrip_local['maxzoom'] == roundtrip_plan['sources'][2]['export_zooms'][-1])
+    check("Roundtrip bounds follow local extent",
+          roundtrip_style['metadata']['smp:bounds'] == roundtrip_plan['sources'][2]['source_bounds'])
     check("Roundtrip sourceFolders match archive layout",
           roundtrip_style['metadata']['smp:sourceFolders'] == {
               'world-overview': 's/0',
-              'region-detail': 's/1'
+              'region-detail': 's/1',
+              'local-detail': 's/2'
           },
           "got {}".format(roundtrip_style['metadata'].get('smp:sourceFolders')))
     check("Roundtrip uses PNG sources only",

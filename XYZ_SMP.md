@@ -122,11 +122,11 @@ done
 ### 5. Additional Resources Merge
 
 ```bash
-# Merges selected folder content into s/0/
-cp -r "$selected_folder"/* "$tmp_dir/s/0/" 2>/dev/null || true
+# Merges selected folder content into s/2/
+cp -r "$selected_folder"/* "$tmp_dir/s/2/" 2>/dev/null || true
 ```
 
-- Copies additional resources (sprites, fonts, etc.) into `s/0/`
+- Copies additional resources (sprites, fonts, etc.) into `s/2/`
 - Allows including non-tile assets in the SMP package
 
 ### 6. Style.json Generation
@@ -138,14 +138,14 @@ Creates a MapLibre GL JS style specification:
   "version": 8,
   "name": "javari-<folder>-<year>-z<max_zoom>",
   "sources": {
-    "mbtiles-source": {
+    "local-detail": {
       "format": "jpg",
       "type": "raster",
       "minzoom": 0,
       "maxzoom": <detected_max_zoom>,
       "scheme": "xyz",
       "bounds": [-73.74, -7.23, -69.38, -4.34],
-      "tiles": ["smp://maps.v1/s/0/{z}/{x}/{y}.jpg"]
+      "tiles": ["smp://maps.v1/s/2/{z}/{x}/{y}.jpg"]
     }
   },
   "layers": [
@@ -155,9 +155,9 @@ Creates a MapLibre GL JS style specification:
       "paint": { "background-color": "white" }
     },
     {
-      "id": "raster",
+      "id": "local-raster",
       "type": "raster",
-      "source": "mbtiles-source",
+      "source": "local-detail",
       "paint": { "raster-opacity": 1 }
     }
   ],
@@ -165,15 +165,15 @@ Creates a MapLibre GL JS style specification:
     "smp:bounds": [-73.74, -7.23, -69.38, -4.34],
     "smp:maxzoom": <max_zoom>,
     "smp:sourceFolders": {
-      "mbtiles-source": "0"
+      "local-detail": "s/2"
     }
   }
 }
 ```
 
 **Key fields:**
-- **`sources.*.tiles`**: Uses `smp://` protocol pointing to `s/0/{z}/{x}/{y}.jpg`
-- **`metadata.smp:sourceFolders`**: Maps source ID to folder name (`"0"`)
+- **`sources.*.tiles`**: Uses `smp://` protocol pointing to `s/2/{z}/{x}/{y}.jpg`
+- **`metadata.smp:sourceFolders`**: Maps source ID to folder path (`"s/2"`)
 - **`bounds`**: Geographic extent in WGS84 (currently hardcoded for Javari region)
 - **`maxzoom`**: Automatically detected from folder structure
 
@@ -221,7 +221,7 @@ When extracted, the SMP contains:
 ```
 style.json              # MapLibre style specification
 s/
-└── 0/                  # Source tiles
+└── 2/                  # Local Detail source tiles
     ├── 0/              # Zoom levels
     │   └── 0/
     │       └── 0.jpg
@@ -253,7 +253,7 @@ If your tiles are PNG instead of JPG, modify line 68:
 And line 77:
 
 ```bash
-"tiles": ["smp://maps.v1/s/0/{z}/{x}/{y}.png"]
+"tiles": ["smp://maps.v1/s/2/{z}/{x}/{y}.png"]
 ```
 
 ### Changing Output Name Pattern
