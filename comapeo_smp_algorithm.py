@@ -161,7 +161,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterBoolean(
                 self.INCLUDE_WORLD_BASE_ZOOMS,
                 self.tr('Include World overview source'),
-                defaultValue=False,
+                defaultValue=True,
                 optional=False
             )
         )

@@ -360,13 +360,17 @@ class SMPGenerator:
             )
             yield zoom, zoom_extent, self._calculate_tiles_at_zoom(zoom_extent, zoom)
 
-    def _build_single_source_plan(self, extent, zoom_list, source_id, source_index):
+    def _build_single_source_plan(self, extent, zoom_list, source_id, source_index,
+                                  source_role=None, source_name=None, layer_id=None):
         """Build a per-source export plan with 7-element tiles_by_zoom tuples.
 
         :param extent: QgsRectangle extent for this source
         :param zoom_list: List of zoom levels to include
         :param source_id: Source identifier string (e.g. "world-overview")
         :param source_index: Integer source index for the fixed source slot
+        :param source_role: Optional explicit semantic role override
+        :param source_name: Optional explicit display name override
+        :param layer_id: Optional explicit style layer id override
         :return: Dict with source_id, source_index, source_bounds, export_zooms,
                  tiles_by_zoom (7-tuples), total_tiles
         """
@@ -388,28 +392,46 @@ class SMPGenerator:
             'tiles_by_zoom': tiles_by_zoom,
             'total_tiles': total_tiles,
         }
+        if source_role is not None:
+            plan['source_role'] = source_role
+        if source_name is not None:
+            plan['source_name'] = source_name
+        if layer_id is not None:
+            plan['layer_id'] = layer_id
         slot = self._source_slot_for_plan(plan)
         plan['source_role'] = slot['role']
         plan['source_name'] = slot['name']
+        plan['layer_id'] = slot['layer_id']
         return plan
 
     @staticmethod
     def _source_slot_for_plan(source_plan):
-        slot = SOURCE_SLOT_BY_ID.get(source_plan.get('source_id'))
-        if slot is not None:
-            return slot
-        slot = SOURCE_SLOT_BY_INDEX.get(source_plan.get('source_index'))
-        if slot is not None:
-            return slot
+        source_id = source_plan.get('source_id')
         source_index = source_plan.get('source_index', 0)
-        source_id = source_plan.get('source_id', f'source-{source_index}')
-        return {
-            'role': f'source-{source_index}',
-            'source_id': source_id,
-            'source_index': source_index,
-            'name': source_id,
-            'layer_id': f'source-{source_index}-raster',
-        }
+        base_slot = SOURCE_SLOT_BY_ID.get(source_id)
+        if base_slot is None:
+            base_slot = SOURCE_SLOT_BY_INDEX.get(source_index)
+        if base_slot is None:
+            source_id = source_id or f'source-{source_index}'
+            base_slot = {
+                'role': f'source-{source_index}',
+                'source_id': source_id,
+                'source_index': source_index,
+                'name': source_id,
+                'layer_id': f'source-{source_index}-raster',
+            }
+        else:
+            base_slot = dict(base_slot)
+
+        base_slot['source_id'] = source_id or base_slot['source_id']
+        base_slot['source_index'] = source_index
+        if 'source_role' in source_plan:
+            base_slot['role'] = source_plan['source_role']
+        if 'source_name' in source_plan:
+            base_slot['name'] = source_plan['source_name']
+        if 'layer_id' in source_plan:
+            base_slot['layer_id'] = source_plan['layer_id']
+        return base_slot
 
     @staticmethod
     def _root_default_zoom(min_zoom, max_zoom):
@@ -452,6 +474,20 @@ class SMPGenerator:
             ):
                 return False
         return True
+
+    def _source_label_map(self, source_plans):
+        labels = {
+            slot['source_index']: slot['name'] for slot in FIXED_SOURCE_SLOTS
+        }
+        for source_plan in source_plans or []:
+            source_index = source_plan.get('source_index')
+            if source_index is None:
+                continue
+            labels[source_index] = source_plan.get(
+                'source_name',
+                self._source_slot_for_plan(source_plan)['name']
+            )
+        return labels
 
     @classmethod
     def _source_plan_signature(cls, source_plans):
@@ -607,12 +643,23 @@ class SMPGenerator:
             )
             sources.append(region_plan)
 
-        local_plan = self._build_single_source_plan(
-            extent,
-            list(range(min_zoom, max_zoom + 1)),
-            source_id="local-detail",
-            source_index=2,
-        )
+        if not include_world_base_zooms and not include_region:
+            local_plan = self._build_single_source_plan(
+                extent,
+                list(range(min_zoom, max_zoom + 1)),
+                source_id="mbtiles-source",
+                source_index=0,
+                source_role='local',
+                source_name='QGIS Map',
+                layer_id='raster',
+            )
+        else:
+            local_plan = self._build_single_source_plan(
+                extent,
+                list(range(min_zoom, max_zoom + 1)),
+                source_id="local-detail",
+                source_index=2,
+            )
         sources.append(local_plan)
 
         tiles_by_zoom = []
@@ -1455,10 +1502,8 @@ class SMPGenerator:
         source_tile_counts = {}
         for _z, _mx, _Mx, _my, _My, num_tiles, source_index in tiles_by_zoom:
             source_tile_counts[source_index] = source_tile_counts.get(source_index, 0) + num_tiles
+        source_labels = self._source_label_map(source_plans)
         if len(source_tile_counts) > 1:
-            source_labels = {
-                slot['source_index']: slot['name'] for slot in FIXED_SOURCE_SLOTS
-            }
             for si in sorted(source_tile_counts):
                 label = source_labels.get(si, f"Source {si}")
                 self.log(f"{label} tiles: {source_tile_counts[si]} (source {si})")
@@ -1476,9 +1521,7 @@ class SMPGenerator:
         if self.feedback and total_tiles > 0:
             self.feedback.setProgress(0)
 
-        source_labels = {
-            slot['source_index']: slot['name'] for slot in FIXED_SOURCE_SLOTS
-        }
+        source_labels = self._source_label_map(source_plans)
         _current_source = [None]
 
         def iter_tile_tasks():

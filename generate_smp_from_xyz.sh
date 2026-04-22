@@ -31,24 +31,24 @@ select selected_folder in "${options[@]}"; do
         echo "Output name: $name"
         
         # Create temp directory structure
-        mkdir -p "$tmp_dir/s/2"
+        mkdir -p "$tmp_dir/s/0"
         
-        # Copy all numbered folders to s/2
-        echo "Copying numbered folders (0-$max_zoom) to s/2..."
+        # Copy all numbered folders to s/0
+        echo "Copying numbered folders (0-$max_zoom) to s/0..."
         for i in $(seq 0 $max_zoom); do
             if [[ -d "$i" ]]; then
                 echo "  Copying folder: $i"
-                cp -r "$i" "$tmp_dir/s/2/"
+                cp -r "$i" "$tmp_dir/s/0/"
             else
                 echo "  Skipping missing folder: $i"
             fi
         done
         
-        # Merge selected folder content into s/2
-        echo "Merging $selected_folder content into s/2..."
+        # Merge selected folder content into s/0
+        echo "Merging $selected_folder content into s/0..."
         if [[ -d "$selected_folder" ]]; then
             if ls "$selected_folder"/* > /dev/null 2>&1; then
-                cp -r "$selected_folder"/* "$tmp_dir/s/2/" 2>/dev/null || true
+                cp -r "$selected_folder"/* "$tmp_dir/s/0/" 2>/dev/null || true
                 echo "  Content merged successfully"
             else
                 echo "  Selected folder is empty"
@@ -64,7 +64,7 @@ select selected_folder in "${options[@]}"; do
   "version": 8,
   "name": "$name",
   "sources": {
-    "local-detail": {
+    "mbtiles-source": {
       "format": "jpg",
       "name": "$name",
       "version": "2.0",
@@ -74,7 +74,7 @@ select selected_folder in "${options[@]}"; do
       "scheme": "xyz",
       "bounds": [-73.740234375, -7.231698708367133, -69.3896484375, -4.346411275333186],
       "center": [0, 0, 6],
-      "tiles": ["smp://maps.v1/s/2/{z}/{x}/{y}.jpg"]
+      "tiles": ["smp://maps.v1/s/0/{z}/{x}/{y}.jpg"]
     }
   },
   "layers": [
@@ -86,9 +86,9 @@ select selected_folder in "${options[@]}"; do
       }
     },
     {
-      "id": "local-raster",
+      "id": "raster",
       "type": "raster",
-      "source": "local-detail",
+      "source": "mbtiles-source",
       "paint": {
         "raster-opacity": 1
       }
@@ -98,7 +98,7 @@ select selected_folder in "${options[@]}"; do
     "smp:bounds": [-73.740234375, -7.231698708367133, -69.3896484375, -4.346411275333186],
     "smp:maxzoom": $max_zoom,
     "smp:sourceFolders": {
-      "local-detail": "s/2"
+      "mbtiles-source": "s/0"
     }
   },
   "center": [-71.56494140625, -5.7890549918501595],

@@ -564,8 +564,8 @@ class TestTileGridRects(unittest.TestCase):
         self.assertEqual(r['zoom'], 0)
         self.assertEqual(r['x'], 0)
         self.assertEqual(r['y'], 0)
-        self.assertEqual(r['source_index'], 2)
-        self.assertEqual(r['source_id'], 'local-detail')
+        self.assertEqual(r['source_index'], 0)
+        self.assertEqual(r['source_id'], 'mbtiles-source')
         self.assertEqual(r['source_role'], 'local')
 
     def test_rect_has_required_keys(self):
@@ -1179,8 +1179,8 @@ class TestCacheDirectory(unittest.TestCase):
 
         tmp = tempfile.mkdtemp()
         try:
-            # Pre-create the local tile file at fixed local source_index=2.
-            zoom_dir = os.path.join(tmp, '2', '0', '0')
+            # Pre-create the local tile file at the legacy single-source index=0.
+            zoom_dir = os.path.join(tmp, '0', '0', '0')
             os.makedirs(zoom_dir, exist_ok=True)
             tile_path = os.path.join(zoom_dir, '0.png')
             with open(tile_path, 'wb') as f:
@@ -1309,8 +1309,8 @@ class TestCacheDirectory(unittest.TestCase):
         out_dir = tempfile.mkdtemp()
         try:
             import json
-            current_dir = os.path.join(cache, '2', '0', '0')
-            stale_dir = os.path.join(cache, '2', '1', '0')
+            current_dir = os.path.join(cache, '0', '0', '0')
+            stale_dir = os.path.join(cache, '0', '1', '0')
             os.makedirs(current_dir, exist_ok=True)
             os.makedirs(stale_dir, exist_ok=True)
             with open(os.path.join(current_dir, '0.png'), 'wb') as fh:
@@ -1318,7 +1318,7 @@ class TestCacheDirectory(unittest.TestCase):
             with open(os.path.join(stale_dir, '0.png'), 'wb') as fh:
                 fh.write(b'\x89PNG')
             with open(os.path.join(cache, TileCache.META_FILE), 'w') as fh:
-                json.dump({"2/0/0/0": "PNG:85:any"}, fh)
+                json.dump({"0/0/0/0": "PNG:85:any"}, fh)
 
             out_path = os.path.join(out_dir, 'manifest.smp')
             gen.generate_smp_from_canvas(
@@ -1328,9 +1328,9 @@ class TestCacheDirectory(unittest.TestCase):
             import zipfile
             with zipfile.ZipFile(out_path) as zf:
                 names = zf.namelist()
-            self.assertIn('s/2/0/0/0.png', names)
-            self.assertNotIn('s/2/1/0/0.png', names)
-            self.assertNotIn('s/2/_cache_meta.json', names)
+            self.assertIn('s/0/0/0/0.png', names)
+            self.assertNotIn('s/0/1/0/0.png', names)
+            self.assertNotIn('s/0/_cache_meta.json', names)
         finally:
             shutil.rmtree(cache, ignore_errors=True)
             shutil.rmtree(out_dir, ignore_errors=True)
@@ -2119,8 +2119,8 @@ class TestCheckParameterValues(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(msg, '')
 
-    def test_world_overview_toggle_defaults_off(self):
-        """The fixed-slot UI should default the World overview source to disabled."""
+    def test_world_overview_toggle_defaults_on(self):
+        """The legacy-compatible UI should default the World overview source to enabled."""
         algo = self._make_algorithm()
         algo.addParameter = MagicMock()
         bool_ctor = algo.initAlgorithm.__globals__['QgsProcessingParameterBoolean']
@@ -2133,7 +2133,7 @@ class TestCheckParameterValues(unittest.TestCase):
             if call.args and call.args[0] == algo.INCLUDE_WORLD_BASE_ZOOMS
         ]
         self.assertEqual(len(world_calls), 1)
-        self.assertFalse(world_calls[0].kwargs['defaultValue'])
+        self.assertTrue(world_calls[0].kwargs['defaultValue'])
 
     def test_non_integer_enum_value_blocked(self):
         algo = self._make_algorithm()
@@ -2694,7 +2694,7 @@ class TestVersionFileInArchive(unittest.TestCase):
 
 
 class TestSourceFoldersValue(unittest.TestCase):
-    """smp:sourceFolders value must be 's/0', not '0'."""
+    """smp:sourceFolders value must use legacy single-source slot 's/0'."""
 
     def setUp(self):
         self.gen = SMPGenerator()
@@ -2703,10 +2703,10 @@ class TestSourceFoldersValue(unittest.TestCase):
     def _make_extent(self):
         return _FakeRectangle(-10, -10, 10, 10)
 
-    def test_source_folders_value_uses_local_fixed_slot(self):
+    def test_source_folders_value_uses_legacy_single_source_slot(self):
         style = self.gen._create_style_from_canvas(self._make_extent(), 0, 10)
         source_id = list(style['sources'].keys())[0]
-        self.assertEqual(style['metadata']['smp:sourceFolders'][source_id], 's/2')
+        self.assertEqual(style['metadata']['smp:sourceFolders'][source_id], 's/0')
 
     def test_source_folders_value_not_bare_0(self):
         style = self.gen._create_style_from_canvas(self._make_extent(), 0, 10)
@@ -3798,8 +3798,8 @@ class TestMultiSourceExportPlan(unittest.TestCase):
             include_world_base_zooms=False
         )
         self.assertEqual(len(plan['sources']), 1)
-        self.assertEqual(plan['sources'][0]['source_id'], 'local-detail')
-        self.assertEqual(plan['sources'][0]['source_index'], 2)
+        self.assertEqual(plan['sources'][0]['source_id'], 'mbtiles-source')
+        self.assertEqual(plan['sources'][0]['source_index'], 0)
 
     def test_world_enabled_has_two_sources(self):
         plan = self.gen._build_export_plan(
@@ -3905,19 +3905,20 @@ class TestMultiSourceExportPlan(unittest.TestCase):
             expected_pct = (plan['world_coverage_tiles'] / plan['world_tiles']) * 100
             self.assertAlmostEqual(plan['world_pct'], expected_pct, places=5)
 
-    def test_world_disabled_keeps_local_fixed_slot(self):
-        """When world is disabled, the export should be Local-only on slot 2."""
+    def test_world_disabled_preserves_legacy_single_source_contract(self):
+        """When world is disabled, local-only exports should use the legacy single-source slot."""
         plan = self.gen._build_export_plan(
             self.user_extent, 5, 10,
             include_world_base_zooms=False
         )
         self.assertEqual(len(plan['sources']), 1)
-        self.assertEqual(plan['sources'][0]['source_id'], 'local-detail')
+        self.assertEqual(plan['sources'][0]['source_id'], 'mbtiles-source')
+        self.assertEqual(plan['sources'][0]['source_index'], 0)
         self.assertEqual(plan['world_coverage_tiles'], plan['total_tiles'])
         for t in plan['tiles_by_zoom']:
-            self.assertEqual(t[6], 2)
-        self.assertFalse(any(t[6] == 0 for t in plan['tiles_by_zoom']))
+            self.assertEqual(t[6], 0)
         self.assertFalse(any(t[6] == 1 for t in plan['tiles_by_zoom']))
+        self.assertFalse(any(t[6] == 2 for t in plan['tiles_by_zoom']))
 
     def test_world_tiles_backward_compat_when_disabled(self):
         """world_tiles formula must also hold when world tiles are disabled."""
@@ -4027,14 +4028,16 @@ class TestMultiSourceStyleJson(unittest.TestCase):
             'source_name': 'Local Detail',
         }
 
-    def test_default_style_uses_local_fixed_slot(self):
-        """Default style generation should use the Local fixed slot."""
+    def test_default_style_uses_legacy_single_source_contract(self):
+        """Default style generation should preserve the legacy single-source contract."""
         style = self.gen._create_style_from_canvas(
             self._make_extent(), 5, 10, 'PNG'
         )
-        self.assertEqual(list(style['sources'].keys()), ['local-detail'])
-        self.assertEqual(style['metadata']['smp:sourceFolders']['local-detail'], 's/2')
-        self.assertIn('s/2/', style['sources']['local-detail']['tiles'][0])
+        self.assertEqual(list(style['sources'].keys()), ['mbtiles-source'])
+        self.assertEqual(style['metadata']['smp:sourceFolders']['mbtiles-source'], 's/0')
+        self.assertIn('s/0/', style['sources']['mbtiles-source']['tiles'][0])
+        raster_layers = [l for l in style['layers'] if l['type'] == 'raster']
+        self.assertEqual([layer['id'] for layer in raster_layers], ['raster'])
 
     def test_local_only_style_with_one_plan(self):
         """Single-source exports must still use the Local fixed slot metadata."""
@@ -4158,14 +4161,14 @@ class TestMultiSourceStyleJson(unittest.TestCase):
 class TestTilePathsFromSourcePlans(unittest.TestCase):
     """Tests for _tile_paths_from_source_plans static method."""
 
-    def test_local_only_source_produces_fixed_slot_paths(self):
-        """Local-only exports should use the stable Local slot prefix."""
+    def test_local_only_source_produces_legacy_single_source_paths(self):
+        """Local-only exports should use the legacy single-source path prefix."""
         source_plans = [{
-            'tiles_by_zoom': [(6, 0, 0, 0, 0, 1, 2)],
-            'source_index': 2
+            'tiles_by_zoom': [(6, 0, 0, 0, 0, 1, 0)],
+            'source_index': 0
         }]
         paths = SMPGenerator._tile_paths_from_source_plans(source_plans, 'PNG')
-        self.assertIn('2/6/0/0.png', paths)
+        self.assertIn('0/6/0/0.png', paths)
 
     def test_world_and_local_sources_produce_sparse_paths(self):
         """World + Local exports should preserve sparse fixed-slot prefixes."""
@@ -4209,8 +4212,8 @@ class TestArchivePathsMultiSource(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_local_only_tiles_under_s_2(self):
-        """Local-only tiles should be archived under s/2/{z}/{x}/{y}."""
+    def test_local_only_tiles_under_s_0(self):
+        """Local-only tiles should be archived under s/0/{z}/{x}/{y}."""
         gen = SMPGenerator()
         import json
         style_path = os.path.join(self.tmp, 'style.json')
@@ -4218,7 +4221,7 @@ class TestArchivePathsMultiSource(unittest.TestCase):
             json.dump({"version": 8, "sources": {}, "layers": []}, f)
 
         tiles_dir = os.path.join(self.tmp, 'tiles')
-        tile_file_dir = os.path.join(tiles_dir, '2', '6', '0')
+        tile_file_dir = os.path.join(tiles_dir, '0', '6', '0')
         os.makedirs(tile_file_dir, exist_ok=True)
         with open(os.path.join(tile_file_dir, '0.png'), 'wb') as f:
             f.write(b'\x89PNG\r\n\x1a\n')
@@ -4233,7 +4236,7 @@ class TestArchivePathsMultiSource(unittest.TestCase):
         import zipfile
         with zipfile.ZipFile(out_path) as zf:
             names = zf.namelist()
-        self.assertIn('s/2/6/0/0.png', names)
+        self.assertIn('s/0/6/0/0.png', names)
 
     def test_three_source_tiles_under_s_0_s_1_and_s_2(self):
         """Three-source exports should preserve all three fixed-slot directories."""
@@ -4764,7 +4767,7 @@ class TestDedupWithOverlappingZooms(unittest.TestCase):
 
 
 class TestLocalFixedSlotWhenWorldDisabled(unittest.TestCase):
-    """When World is disabled, Local should remain on its fixed slot."""
+    """When World is disabled, Local-only exports should preserve the legacy single-source layout."""
 
     def setUp(self):
         self.gen = SMPGenerator()
@@ -4772,34 +4775,36 @@ class TestLocalFixedSlotWhenWorldDisabled(unittest.TestCase):
             ext.xMinimum(), ext.yMinimum(), ext.xMaximum(), ext.yMaximum()
         ]
 
-    def test_single_source_named_local_detail(self):
+    def test_single_source_named_mbtiles_source(self):
         plan = self.gen._build_export_plan(
             _FakeRectangle(-1, -1, 1, 1), 5, 10,
             include_world_base_zooms=False
         )
-        self.assertEqual(plan['sources'][0]['source_id'], 'local-detail')
-        self.assertEqual(plan['sources'][0]['source_index'], 2)
+        self.assertEqual(plan['sources'][0]['source_id'], 'mbtiles-source')
+        self.assertEqual(plan['sources'][0]['source_index'], 0)
 
-    def test_style_single_source_uses_local_slot(self):
+    def test_style_single_source_uses_legacy_slot(self):
         self.gen._get_bounds_wgs84 = MagicMock(return_value=[-1, -1, 1, 1])
         style = self.gen._create_style_from_canvas(
             _FakeRectangle(-1, -1, 1, 1), 5, 10, 'PNG'
         )
         source_ids = list(style['sources'].keys())
-        self.assertEqual(source_ids, ['local-detail'])
+        self.assertEqual(source_ids, ['mbtiles-source'])
         self.assertEqual(
-            style['metadata']['smp:sourceFolders']['local-detail'], 's/2'
+            style['metadata']['smp:sourceFolders']['mbtiles-source'], 's/0'
         )
+        raster_layers = [layer for layer in style['layers'] if layer['type'] == 'raster']
+        self.assertEqual([layer['id'] for layer in raster_layers], ['raster'])
 
-    def test_tiles_by_zoom_use_local_source_index(self):
-        """When World is disabled, tiles_by_zoom tuples should use source_index=2."""
+    def test_tiles_by_zoom_use_legacy_source_index(self):
+        """When World is disabled, tiles_by_zoom tuples should use source_index=0."""
         plan = self.gen._build_export_plan(
             _FakeRectangle(-1, -1, 1, 1), 5, 10,
             include_world_base_zooms=False
         )
         for t in plan['tiles_by_zoom']:
             self.assertEqual(len(t), 7)
-            self.assertEqual(t[6], 2)
+            self.assertEqual(t[6], 0)
 
 
 class TestGenerateSmpOrchestrationMultiSource(unittest.TestCase):

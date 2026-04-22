@@ -60,7 +60,7 @@ produce vector tiles, glyphs, or sprite assets.
    - **Maximum zoom level**: The maximum zoom level for the Local detail source (0-24)
    - **Tile image format**: PNG, JPG, or WebP format for the generated tiles
    - **JPEG/WebP quality**: Compression quality for JPG/WebP tiles (1-100)
-   - **Include World overview source**: Optional full-world context rendered below higher-detail sources
+   - **Include World overview source**: Optional full-world context rendered below higher-detail sources (enabled by default for backward compatibility)
    - **World maximum zoom**: When World is enabled, generates world tiles from zoom 0 through this zoom
    - **Include Region detail source**: Optional middle-detail source between World and Local
    - **Region extent**: Optional Region extent that must contain the Local extent when Region is enabled
@@ -71,8 +71,10 @@ produce vector tiles, glyphs, or sprite assets.
 When **Include World overview source** is enabled, zoom levels `0..WORLD_MAX_ZOOM`
 are exported as full-world tiles on source slot `s/0`. When **Include Region detail
 source** is enabled, it occupies source slot `s/1` for its configured zoom range.
-The selected Local extent always renders on source slot `s/2`, above the optional
-World and Region sources.
+If both World and Region are disabled, the selected Local extent uses the legacy
+single-source contract on source slot `s/0` with source id `mbtiles-source`.
+When either World or Region is enabled, the selected Local extent renders on source
+slot `s/2`, above the optional World and Region sources.
 
 The plugin renders visible project layers in QGIS layer-tree order, and uses
 custom layer order when that project setting is enabled.

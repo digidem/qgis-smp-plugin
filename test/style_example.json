@@ -2,7 +2,7 @@
     "version": 8,
     "name": "QGIS MAP",
     "sources": {
-        "local-detail": {
+        "mbtiles-source": {
             "name": "QGIS Map",
             "format": "jpg",
             "minzoom": 0,
@@ -24,7 +24,7 @@
                 8
             ],
             "tiles": [
-                "smp://maps.v1/s/2/{z}/{x}/{y}.jpg"
+                "smp://maps.v1/s/0/{z}/{x}/{y}.jpg"
             ]
         }
     },
@@ -37,9 +37,9 @@
             }
         },
         {
-            "id": "local-raster",
+            "id": "raster",
             "type": "raster",
-            "source": "local-detail",
+            "source": "mbtiles-source",
             "paint": {
                 "raster-opacity": 1
             }
@@ -54,7 +54,7 @@
         ],
         "smp:maxzoom": 16,
         "smp:sourceFolders": {
-            "local-detail": "s/2"
+            "mbtiles-source": "s/0"
         }
     },
     "center": [

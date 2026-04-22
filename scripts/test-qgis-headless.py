@@ -110,11 +110,15 @@ try:
 
     style = gen._create_style_from_canvas(extent, 0, 10, 'PNG')
     src = list(style['sources'].values())[0]
+    first_source_id = list(style['sources'].keys())[0]
     check("Style version 8", style['version'] == 8)
     check("PNG tiles URL", '.png' in src['tiles'][0])
     check("minzoom=0, maxzoom=10", src['minzoom'] == 0 and src['maxzoom'] == 10)
-    check("Local-only source folder = s/2",
-          style['metadata']['smp:sourceFolders'][list(style['sources'].keys())[0]] == 's/2')
+    check("Local-only source id = mbtiles-source", first_source_id == 'mbtiles-source')
+    check("Local-only source folder = s/0",
+          style['metadata']['smp:sourceFolders'][first_source_id] == 's/0')
+    check("Local-only tile path uses s/0",
+          src['tiles'][0].endswith('s/0/{z}/{x}/{y}.png'))
 
     style_webp = gen._create_style_from_canvas(extent, 0, 10, 'WEBP')
     src_webp = list(style_webp['sources'].values())[0]
