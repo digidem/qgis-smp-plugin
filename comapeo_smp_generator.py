@@ -197,8 +197,6 @@ class TileCache:
                 self._state['dirty'] = False
 
 
-
-
 class SMPGenerator:
     """
     Class to generate SMP (Styled Map Package) files for CoMapeo
@@ -542,7 +540,8 @@ class SMPGenerator:
                 )
         elif include_world_base_zooms and world_max_zoom >= min_zoom:
             raise ValueError(
-                f"World maximum zoom ({world_max_zoom}) must be less than Local minimum zoom ({min_zoom}) when Region is disabled."
+                f"World maximum zoom ({world_max_zoom}) must be less than "
+                f"Local minimum zoom ({min_zoom}) when Region is disabled."
             )
 
     @staticmethod
@@ -1102,9 +1101,10 @@ class SMPGenerator:
             return base_name
         return "QGIS MAP"
 
-    def _create_style_from_canvas(self, extent, min_zoom, max_zoom, tile_format=None,
-                                 include_world_base_zooms=False, world_max_zoom=3,
-                                 source_bounds=None, source_plans=None):
+    def _create_style_from_canvas(
+            self, extent, min_zoom, max_zoom, tile_format=None,
+            include_world_base_zooms=False, world_max_zoom=3,
+            source_bounds=None, source_plans=None):
         """
         Create a MapLibre style JSON from the current map canvas
 
@@ -1964,7 +1964,6 @@ class SMPGenerator:
             0,  # External file attributes
             local_offset
         ) + arcname_bytes
-
 
     def _calculate_tile_extent(self, xtile, ytile, zoom):
         """

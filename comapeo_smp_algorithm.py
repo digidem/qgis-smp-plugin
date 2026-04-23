@@ -156,7 +156,6 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
         )
         self.addParameter(jpeg_quality_param)
 
-
         self.addParameter(
             QgsProcessingParameterBoolean(
                 self.INCLUDE_WORLD_BASE_ZOOMS,
@@ -280,8 +279,14 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
             'world_max_zoom': self.parameterAsInt(parameters, self.WORLD_MAX_ZOOM, context),
             'include_region': include_region,
             'region_extent': self._region_extent_value(parameters, context) if include_region else None,
-            'region_min_zoom': self.parameterAsInt(parameters, self.REGION_MIN_ZOOM, context) if include_region else None,
-            'region_max_zoom': self.parameterAsInt(parameters, self.REGION_MAX_ZOOM, context) if include_region else None,
+            'region_min_zoom': (
+                self.parameterAsInt(parameters, self.REGION_MIN_ZOOM, context)
+                if include_region else None
+            ),
+            'region_max_zoom': (
+                self.parameterAsInt(parameters, self.REGION_MAX_ZOOM, context)
+                if include_region else None
+            ),
         }
 
     def checkParameterValues(self, parameters, context):
