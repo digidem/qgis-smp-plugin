@@ -91,6 +91,11 @@ builds the plugin zip via `git archive`, and attaches it to the release.
   `make test-legacy`
 - Lint command (non-blocking by Makefile design): `make pylint`
 - Style command (non-blocking by Makefile design): `make pep8`
+- **CI lint check (must pass):** `make flake8` — this is what the
+  GitHub Actions `lint` workflow runs (`flake8 --count --show-source
+  --statistics .`). Config is in `setup.cfg` `[flake8]` section.
+  Run this locally before pushing; `make pylint` and `make pep8` are
+  advisory only and do **not** match the CI gate.
 - Security scan: `make bandit` (screen) or `make bandit-report` (JSON file)
 - Package build: `make package VERSION=X.Y.Z`
 
@@ -114,6 +119,7 @@ builds the plugin zip via `git archive`, and attaches it to the release.
 
 - Changed code is scoped to the request and avoids unrelated refactors.
 - Relevant tests were added/updated for behavioral changes.
+- `make flake8` passes (this is the CI gate; `make pylint`/`make pep8` are advisory).
 - At least one verification command was executed and results were reported.
 - Documentation updated if parameters, output format, or workflow changed.
 - Version/changelog updates in `metadata.txt` only when release work is requested.
