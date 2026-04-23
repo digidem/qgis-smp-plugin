@@ -201,7 +201,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                 self.tr('Region minimum zoom level'),
                 QgsProcessingParameterNumber.Integer,
                 defaultValue=6,
-                optional=False,
+                optional=True,
                 minValue=0,
                 maxValue=24
             )
@@ -213,7 +213,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                 self.tr('Region maximum zoom level'),
                 QgsProcessingParameterNumber.Integer,
                 defaultValue=9,
-                optional=False,
+                optional=True,
                 minValue=0,
                 maxValue=24
             )

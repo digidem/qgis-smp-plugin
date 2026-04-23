@@ -631,10 +631,6 @@ class SMPGenerator:
             sources.append(world_plan)
 
         if include_region:
-            if region_extent is None:
-                raise ValueError('Region extent is required when INCLUDE_REGION is enabled.')
-            if region_min_zoom is None or region_max_zoom is None:
-                raise ValueError('Region min/max zoom values are required when INCLUDE_REGION is enabled.')
             region_plan = self._build_single_source_plan(
                 region_extent,
                 list(range(region_min_zoom, region_max_zoom + 1)),
@@ -1137,7 +1133,15 @@ class SMPGenerator:
         if not source_plans:
             raise ValueError('Source plan is required to create SMP style metadata.')
 
-        local_plan = source_plans[-1]
+        # Find the local plan by source_id rather than assuming it is last.
+        # When world + region + local are all present the order is
+        # [world, region, local], but the standalone path produces a single
+        # "mbtiles-source" plan.
+        local_plan = next(
+            (sp for sp in source_plans
+             if sp.get('source_id') in ('local-detail', 'mbtiles-source')),
+            source_plans[-1],
+        )
         local_bounds = local_plan['source_bounds']
         center_lon = (local_bounds[0] + local_bounds[2]) / 2
         center_lat = (local_bounds[1] + local_bounds[3]) / 2
