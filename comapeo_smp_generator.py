@@ -494,7 +494,7 @@ class SMPGenerator:
             bounds = ','.join(str(value) for value in source_plan.get('source_bounds', []))
             export_zooms = source_plan.get('export_zooms', [])
             if export_zooms:
-                zoom_signature = f"{export_zooms[0]}-{export_zooms[-1]}"
+                zoom_signature = ','.join(str(z) for z in export_zooms)
             else:
                 zoom_signature = 'none'
             parts.append(
@@ -517,6 +517,9 @@ class SMPGenerator:
         if include_world_base_zooms and world_max_zoom < 0:
             raise ValueError('World maximum zoom must be greater than or equal to 0.')
 
+        if include_world_base_zooms and world_max_zoom > 24:
+            raise ValueError('World maximum zoom must not exceed 24.')
+
         if include_region:
             if region_extent is None:
                 raise ValueError('Region extent is required when INCLUDE_REGION is enabled.')
@@ -528,7 +531,11 @@ class SMPGenerator:
                 raise ValueError(
                     f"Region minimum zoom ({region_min_zoom}) must not exceed region maximum zoom ({region_max_zoom})."
                 )
-            if not self._extent_contains(region_extent, extent):
+            region_wgs84 = self._get_bounds_wgs84(region_extent)
+            extent_wgs84 = self._get_bounds_wgs84(extent)
+            region_wgs84_rect = QgsRectangle(*region_wgs84)
+            extent_wgs84_rect = QgsRectangle(*extent_wgs84)
+            if not self._extent_contains(region_wgs84_rect, extent_wgs84_rect):
                 raise ValueError('Local extent must be fully contained within the Region extent.')
             if include_world_base_zooms and world_max_zoom >= region_min_zoom:
                 raise ValueError(
@@ -1023,7 +1030,6 @@ class SMPGenerator:
                 extent, min_zoom, max_zoom, tile_format,
                 include_world_base_zooms=include_world_base_zooms,
                 world_max_zoom=world_max_zoom,
-                source_bounds=export_plan['source_bounds'],
                 source_plans=source_plans
             )
             style_path = os.path.join(temp_dir, "style.json")
@@ -1104,7 +1110,7 @@ class SMPGenerator:
     def _create_style_from_canvas(
             self, extent, min_zoom, max_zoom, tile_format=None,
             include_world_base_zooms=False, world_max_zoom=3,
-            source_bounds=None, source_plans=None):
+            source_plans=None):
         """
         Create a MapLibre style JSON from the current map canvas
 

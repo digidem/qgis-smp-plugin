@@ -477,6 +477,56 @@ class TestFixedSourceValidation(unittest.TestCase):
         )
         self.assertEqual([src['source_id'] for src in plan['sources']], ['region-detail', 'local-detail'])
 
+    def test_extent_contains_uses_wgs84_transform(self):
+        """_extent_contains should work after WGS84 transform even when extents
+        are in a projected CRS (simulated via _get_bounds_wgs84 returning
+        different coordinates than the raw extent)."""
+        # Simulate a projected CRS where raw coords are large numbers but
+        # _get_bounds_wgs84 maps them to degree-based WGS84 coords.
+        # Region covers [-5,-5,5,5] in WGS84; local covers [-1,-1,1,1] in WGS84.
+        local_projected = _FakeRectangle(100000, 200000, 110000, 210000)
+        region_projected = _FakeRectangle(90000, 190000, 120000, 230000)
+        self.gen._get_bounds_wgs84 = lambda ext: {
+            id(local_projected): [-1, -1, 1, 1],
+            id(region_projected): [-5, -5, 5, 5],
+        }.get(id(ext), [ext.xMinimum(), ext.yMinimum(), ext.xMaximum(), ext.yMaximum()])
+        # Should NOT raise — local is contained in region after WGS84 transform
+        plan = self.gen._build_export_plan(
+            local_projected, 6, 7,
+            include_region=True,
+            region_extent=region_projected,
+            region_min_zoom=4,
+            region_max_zoom=5,
+        )
+        self.assertEqual([src['source_id'] for src in plan['sources']], ['region-detail', 'local-detail'])
+
+    def test_world_max_zoom_exceeds_24_raises(self):
+        """world_max_zoom > 24 should raise ValueError when world base zooms enabled."""
+        with self.assertRaisesRegex(ValueError, 'must not exceed 24'):
+            self.gen._build_export_plan(
+                self.local_extent, 26, 28,
+                include_world_base_zooms=True,
+                world_max_zoom=25,
+            )
+
+    def test_source_plan_signature_differs_for_same_first_last_zooms(self):
+        """Different zoom sets sharing the same first/last must produce different signatures."""
+        plan_a = [{
+            'source_index': 0,
+            'source_id': 'test',
+            'source_bounds': [-10, -10, 10, 10],
+            'export_zooms': [0, 1, 2, 3, 4],
+        }]
+        plan_b = [{
+            'source_index': 0,
+            'source_id': 'test',
+            'source_bounds': [-10, -10, 10, 10],
+            'export_zooms': [0, 4],
+        }]
+        sig_a = SMPGenerator._source_plan_signature(plan_a)
+        sig_b = SMPGenerator._source_plan_signature(plan_b)
+        self.assertNotEqual(sig_a, sig_b, "Signatures must differ when zoom sets differ")
+
 
 class TestValidateDiskSpace(unittest.TestCase):
     """Test disk space validation."""
