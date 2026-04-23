@@ -429,7 +429,10 @@ class TestFixedSourceValidation(unittest.TestCase):
             )
 
     def test_world_region_zoom_overlap_is_rejected(self):
-        with self.assertRaisesRegex(ValueError, 'World maximum zoom \(4\) must be less than Region minimum zoom \(4\)'):
+        with self.assertRaisesRegex(
+            ValueError,
+            r'World maximum zoom \(4\) must be less than Region minimum zoom \(4\)',
+        ):
             self.gen._build_export_plan(
                 self.local_extent, 6, 7,
                 include_world_base_zooms=True,
@@ -441,7 +444,10 @@ class TestFixedSourceValidation(unittest.TestCase):
             )
 
     def test_region_local_zoom_overlap_is_rejected(self):
-        with self.assertRaisesRegex(ValueError, 'Region maximum zoom \(6\) must be less than Local minimum zoom \(6\)'):
+        with self.assertRaisesRegex(
+            ValueError,
+            r'Region maximum zoom \(6\) must be less than Local minimum zoom \(6\)',
+        ):
             self.gen._build_export_plan(
                 self.local_extent, 6, 7,
                 include_region=True,
