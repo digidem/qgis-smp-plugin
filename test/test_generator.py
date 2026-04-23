@@ -1179,7 +1179,7 @@ class TestCacheDirectory(unittest.TestCase):
 
         tmp = tempfile.mkdtemp()
         try:
-            # Pre-create the local tile file at the legacy single-source index=0.
+            # Pre-create the local tile file at legacy single-source_index=0.
             zoom_dir = os.path.join(tmp, '0', '0', '0')
             os.makedirs(zoom_dir, exist_ok=True)
             tile_path = os.path.join(zoom_dir, '0.png')
