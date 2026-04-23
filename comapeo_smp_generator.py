@@ -1151,10 +1151,7 @@ class SMPGenerator:
         local_bounds = local_plan['source_bounds']
         center_lon = (local_bounds[0] + local_bounds[2]) / 2
         center_lat = (local_bounds[1] + local_bounds[3]) / 2
-        default_zoom = min(
-            max_zoom,
-            max(max(min_zoom, 0), min(max_zoom - 2, 11))
-        )
+        default_zoom = self._root_default_zoom(min_zoom, max_zoom)
 
         sources = {}
         layers = [
