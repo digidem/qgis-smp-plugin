@@ -447,7 +447,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
         feedback.pushInfo(self.tr(f'Estimated size: {estimated_mb:.1f} MB'))
         feedback.pushInfo(
             self.tr(
-                'Estimated world pyramid coverage: {:.2f}% ({}/{:,} tiles)'.format(
+                'Estimated world pyramid coverage: {:.2f}% ({:,}/{:,} tiles)'.format(
                     export_plan['world_pct'],
                     world_coverage_tiles,
                     export_plan['world_tiles']
@@ -455,12 +455,13 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
             )
         )
         if export_plan['gap_zooms']:
-            feedback.pushInfo(
+            feedback.reportError(
                 self.tr(
-                    'Warning: no raster coverage will be generated for zoom levels: {}'.format(
+                    'No raster coverage will be generated for zoom levels: {}'.format(
                         ', '.join(str(zoom) for zoom in export_plan['gap_zooms'])
                     )
-                )
+                ),
+                fatalError=False
             )
 
         # Generate the SMP file
