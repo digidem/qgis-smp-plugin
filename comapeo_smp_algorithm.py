@@ -113,7 +113,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                 self.MIN_ZOOM,
                 self.tr('Minimum zoom level'),
                 QgsProcessingParameterNumber.Integer,
-                defaultValue=0,
+                defaultValue=4,
                 optional=False,
                 minValue=0,
                 maxValue=24

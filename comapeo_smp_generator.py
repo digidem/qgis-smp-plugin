@@ -408,12 +408,15 @@ class SMPGenerator:
 
     @staticmethod
     def _source_slot_for_plan(source_plan):
+        # Tier 1: known source_id (e.g. "world-overview") → fixed slot
         source_id = source_plan.get('source_id')
         source_index = source_plan.get('source_index', 0)
         base_slot = SOURCE_SLOT_BY_ID.get(source_id)
         if base_slot is None:
+            # Tier 2: known source_index (0/1/2) → slot by position
             base_slot = SOURCE_SLOT_BY_INDEX.get(source_index)
         if base_slot is None:
+            # Tier 3: unknown source → generate synthetic slot
             source_id = source_id or f'source-{source_index}'
             base_slot = {
                 'role': f'source-{source_index}',
@@ -437,6 +440,10 @@ class SMPGenerator:
 
     @staticmethod
     def _root_default_zoom(min_zoom, max_zoom):
+        """Pick a reasonable initial zoom between min and max, capped at 11.
+
+        Ensures at least min_zoom, at most max_zoom, and prefers
+        max_zoom - 2 or 11 whichever is lower."""
         return min(
             max_zoom,
             max(max(min_zoom, 0), min(max_zoom - 2, 11))
@@ -657,6 +664,9 @@ class SMPGenerator:
             )
             sources.append(world_plan)
 
+        # Fixed-slot assignment: World=0, Region=1, Local=2.
+        # When world or region is disabled, those slots are simply absent
+        # (sparse indices are intentional — SMP consumers must handle gaps).
         if include_region:
             region_plan = self._build_single_source_plan(
                 region_extent,

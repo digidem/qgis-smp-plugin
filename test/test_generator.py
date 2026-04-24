@@ -531,6 +531,33 @@ class TestFixedSourceValidation(unittest.TestCase):
         self.assertNotEqual(sig_a, sig_b, "Signatures must differ when zoom sets differ")
 
 
+    def test_new_default_params_succeed(self):
+        """New defaults (min_zoom=4, world enabled, world_max_zoom=3) must pass."""
+        plan = self.gen._build_export_plan(
+            self.local_extent, 4, 14,
+            include_world_base_zooms=True,
+            world_max_zoom=3,
+        )
+        source_ids = [src['source_id'] for src in plan['sources']]
+        self.assertIn('world-overview', source_ids)
+        self.assertIn('local-detail', source_ids)
+
+    def test_old_default_params_raise_valueerror(self):
+        """Old defaults (min_zoom=0, world enabled, world_max_zoom=3) must fail.
+
+        Documents the intentional breaking change from the fixed-slot model:
+        validation at _validate_fixed_source_configuration rejects
+        world_max_zoom (3) >= min_zoom (0) when world is enabled and
+        region is disabled.
+        """
+        with self.assertRaisesRegex(ValueError, r'must be less than.*Local minimum zoom'):
+            self.gen._build_export_plan(
+                self.local_extent, 0, 14,
+                include_world_base_zooms=True,
+                world_max_zoom=3,
+            )
+
+
 class TestValidateDiskSpace(unittest.TestCase):
     """Test disk space validation."""
 
@@ -820,6 +847,21 @@ class TestCreateStyleJson(unittest.TestCase):
         self.assertEqual(local_source['maxzoom'], 12)
         self.assertEqual(style['metadata']['smp:sourceFolders']['world-overview'], 's/0')
         self.assertEqual(style['metadata']['smp:sourceFolders']['local-detail'], 's/2')
+
+
+    def test_style_contains_world_and_local_with_new_defaults(self):
+        """Fallback path (no source_plans) with min_zoom=4, world enabled."""
+        style = self.gen._create_style_from_canvas(
+            self._make_extent(), 4, 12,
+            include_world_base_zooms=True,
+            world_max_zoom=3
+        )
+        self.assertEqual(
+            list(style['sources'].keys()),
+            ['world-overview', 'local-detail']
+        )
+        self.assertEqual(style['sources']['world-overview']['maxzoom'], 3)
+        self.assertEqual(style['sources']['local-detail']['minzoom'], 4)
 
 
 class TestCalculateTilesAtZoom(unittest.TestCase):
@@ -2290,6 +2332,41 @@ class TestCheckParameterValues(unittest.TestCase):
 
         self.assertIn('WEBP', str(ctx.exception))
         generate_smp.assert_not_called()
+
+    def test_new_default_params_pass_check_parameter_values(self):
+        """New defaults (min_zoom=4, world enabled, world_max_zoom=3) must pass checkParameterValues."""
+        algo = self._make_algorithm()
+        extent = self._make_extent(0, 0, 1, 1)
+        algo.parameterAsExtent = MagicMock(return_value=extent)
+        algo.parameterAsInt = MagicMock(
+            side_effect=lambda p, k, c: (
+                4 if k == 'MIN_ZOOM' else (
+                    3 if k == 'WORLD_MAX_ZOOM' else (
+                        None if k in ('REGION_MIN_ZOOM', 'REGION_MAX_ZOOM') else 14
+                    )
+                )
+            )
+        )
+
+        def bool_value(_p, key, _c):
+            return key == algo.INCLUDE_WORLD_BASE_ZOOMS
+
+        algo.parameterAsBool = MagicMock(side_effect=bool_value)
+        algo.parameterAsEnum = MagicMock(return_value=0)
+        algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
+
+        import comapeo_smp_generator as _gen_mod
+        with patch.object(_gen_mod.SMPGenerator, 'validate_tile_count',
+                          return_value=(10, None)), \
+             patch.object(_gen_mod.SMPGenerator, 'validate_disk_space'), \
+             patch.object(_gen_mod.SMPGenerator, 'get_world_extent',
+                          return_value=_FakeRectangle(-180, -85.0511, 180, 85.0511)), \
+             patch.object(_gen_mod.SMPGenerator, '_get_bounds_wgs84',
+                          return_value=[0, 0, 1, 1]):
+            ok, msg = algo.checkParameterValues({}, MagicMock())
+
+        self.assertTrue(ok)
+        self.assertEqual(msg, '')
 
     def test_empty_extent_skips_generator(self):
         """An empty extent should not call the generator (return True to let processAlgorithm handle it)."""
