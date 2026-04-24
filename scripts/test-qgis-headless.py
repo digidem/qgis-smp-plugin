@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """
 Headless QGIS integration test for the CoMapeo SMP plugin.
 
