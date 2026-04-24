@@ -6,7 +6,7 @@ Operational instructions for coding agents working in this repository.
 
 - Keep changes focused and minimal for the requested task.
 - Preserve QGIS Processing parameter IDs in `comapeo_smp_algorithm.py` unless a migration is explicitly requested.
-- Parameter IDs to keep stable: `EXTENT`, `MIN_ZOOM`, `MAX_ZOOM`, `TILE_FORMAT`, `JPEG_QUALITY`, `OUTPUT_FILE`.
+- Parameter IDs to keep stable: `EXTENT`, `MIN_ZOOM`, `MAX_ZOOM`, `TILE_FORMAT`, `JPEG_QUALITY`, `OUTPUT_FILE`, `INCLUDE_WORLD_BASE_ZOOMS`, `WORLD_MAX_ZOOM`, `INCLUDE_REGION`, `REGION_EXTENT`, `REGION_MIN_ZOOM`, `REGION_MAX_ZOOM`.
 - Add or update tests when changing tile math, bounds logic, thresholds, or parameter validation.
 - Add or update tests when changing cancellation, cache/resume behavior, archive contents, or layer selection/order.
 - Keep `.smp` archives free of internal cache artifacts such as `_cache_meta.json`, and ensure cache-backed exports only package tiles for the current run.
@@ -82,9 +82,8 @@ builds the plugin zip via `git archive`, and attaches it to the release.
   `make test-logic`, or `PYTHONPATH=. python3 test/test_generator.py`
 - Headless QGIS integration test (uses real QGIS bindings, no GUI):
   `./scripts/test-qgis-headless.py` — verifies CRS transforms, style
-  generation, archive build, dedup, and cancellation in an actual QGIS
-  runtime. Uses system Python (`/usr/bin/python3`) which has PyQt5 and
-  QGIS bindings. Requires `QT_QPA_PLATFORM=offscreen`.
+  generation, archive build, dedup, and cancellation. Requires
+  `QT_QPA_PLATFORM=offscreen`.
 - Install plugin into local QGIS for manual testing: `./install-dev.sh`
   then reload in QGIS (Plugin Reloader or restart).
 - Full legacy QGIS test command (requires QGIS Python env + `nosetests`):
@@ -127,7 +126,7 @@ builds the plugin zip via `git archive`, and attaches it to the release.
 ## When Stuck
 
 - If QGIS runtime is unavailable, run `PYTHONPATH=. python3 test/test_generator.py` and clearly note QGIS-dependent gaps.
-- For headless QGIS testing (real CRS transforms, style generation, archive build): `./scripts/test-qgis-headless.py` — uses system Python (`/usr/bin/python3`) with QGIS bindings, runs offscreen.
+- For headless QGIS testing (real CRS transforms, style generation, archive build): `./scripts/test-qgis-headless.py` — requires `QT_QPA_PLATFORM=offscreen`.
 - If `python3 -m unittest test...` fails outside a QGIS Python environment,
   remember that `test/__init__.py` imports `qgis` eagerly; that failure does
   not invalidate the QGIS-free logic tests.
