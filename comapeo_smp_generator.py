@@ -473,6 +473,25 @@ class SMPGenerator:
                 return False
         return True
 
+    @classmethod
+    def _extent_contains_bounds(cls, outer, inner):
+        class _BoundsRect:
+            def __init__(self, b):
+                self._w, self._s, self._e, self._n = b
+
+            def xMinimum(self):
+                return self._w
+
+            def xMaximum(self):
+                return self._e
+
+            def yMinimum(self):
+                return self._s
+
+            def yMaximum(self):
+                return self._n
+        return cls._extent_contains(_BoundsRect(outer), _BoundsRect(inner))
+
     def _source_label_map(self, source_plans):
         labels = {
             slot['source_index']: slot['name'] for slot in FIXED_SOURCE_SLOTS
@@ -533,9 +552,7 @@ class SMPGenerator:
                 )
             region_wgs84 = self._get_bounds_wgs84(region_extent)
             extent_wgs84 = self._get_bounds_wgs84(extent)
-            region_wgs84_rect = QgsRectangle(*region_wgs84)
-            extent_wgs84_rect = QgsRectangle(*extent_wgs84)
-            if not self._extent_contains(region_wgs84_rect, extent_wgs84_rect):
+            if not self._extent_contains_bounds(region_wgs84, extent_wgs84):
                 raise ValueError('Local extent must be fully contained within the Region extent.')
             if include_world_base_zooms and world_max_zoom >= region_min_zoom:
                 raise ValueError(
@@ -1127,6 +1144,8 @@ class SMPGenerator:
         tile_ext = self._tile_extension(tile_format)
 
         if source_plans is None:
+            # NOTE: This fallback path only supports world+local. Callers with
+            # region enabled must pass source_plans explicitly.
             export_plan = self._build_export_plan(
                 extent,
                 min_zoom,
