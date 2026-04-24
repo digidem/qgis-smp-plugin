@@ -3533,24 +3533,24 @@ class TestSMPValidation(unittest.TestCase):
             "version": 8,
             "name": "Test Map",
             "sources": {
-                "local-detail": {
+                "mbtiles-source": {
                     "type": "raster",
                     "format": tile_ext,
                     "minzoom": 0,
                     "maxzoom": 1,
                     "bounds": [-10, -10, 10, 10],
-                    "tiles": [f"smp://maps.v1/s/2/{{z}}/{{x}}/{{y}}.{tile_ext}"]
+                    "tiles": [f"smp://maps.v1/s/0/{{z}}/{{x}}/{{y}}.{tile_ext}"]
                 }
             },
             "layers": [
                 {"id": "background", "type": "background",
                  "paint": {"background-color": "white"}},
-                {"id": "local-raster", "type": "raster", "source": "local-detail"}
+                {"id": "raster", "type": "raster", "source": "mbtiles-source"}
             ],
             "metadata": {
                 "smp:bounds": [-10, -10, 10, 10],
                 "smp:maxzoom": 1,
-                "smp:sourceFolders": {"local-detail": "s/2"}
+                "smp:sourceFolders": {"mbtiles-source": "s/0"}
             },
             "center": [0, 0],
             "zoom": 0
@@ -3562,7 +3562,7 @@ class TestSMPValidation(unittest.TestCase):
 
         tiles_dir = os.path.join(self.tmp, 'tiles')
         for z, x, y in [(0, 0, 0), (1, 0, 0), (1, 0, 1), (1, 1, 0), (1, 1, 1)]:
-            d = os.path.join(tiles_dir, '2', str(z), str(x))
+            d = os.path.join(tiles_dir, '0', str(z), str(x))
             os.makedirs(d, exist_ok=True)
             with open(os.path.join(d, f'{y}.{tile_ext}'), 'wb') as f:
                 f.write(tile_content)
