@@ -132,7 +132,6 @@ try:
     style_world_local = gen._create_style_from_canvas(
         extent, 6, 12, 'PNG',
         include_world_base_zooms=True, world_max_zoom=3,
-        source_bounds=world_local_plan['source_bounds'],
         source_plans=world_local_plan['sources']
     )
     world_local_sources = style_world_local['sources']
@@ -166,7 +165,6 @@ try:
         extent, 6, 12, 'PNG',
         include_world_base_zooms=True,
         world_max_zoom=3,
-        source_bounds=full_plan['source_bounds'],
         source_plans=full_plan['sources']
     )
     full_sources = style_full['sources']

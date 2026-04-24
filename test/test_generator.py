@@ -40,6 +40,9 @@ class _FakeRectangle:
                 f"{self._xmax} {self._ymax}, {self._xmin} {self._ymax}, "
                 f"{self._xmin} {self._ymin}))")
 
+    def isEmpty(self):
+        return self._xmax <= self._xmin or self._ymax <= self._ymin
+
 
 class _FakeCrs:
     pass
