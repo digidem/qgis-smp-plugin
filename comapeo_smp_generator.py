@@ -1188,8 +1188,17 @@ class SMPGenerator:
         local_plan = next(
             (sp for sp in source_plans
              if sp.get('source_id') in ('local-detail', 'mbtiles-source')),
-            source_plans[-1],
+            None,
         )
+        if local_plan is None:
+            # Defensive: callers should always include a local plan, but
+            # fall back to the last source rather than crashing.
+            self.log(
+                'Warning: no local-detail or mbtiles-source found in '
+                'source_plans; falling back to last source for bounds/center.',
+                Qgis.Warning
+            )
+            local_plan = source_plans[-1]
         local_bounds = local_plan['source_bounds']
         center_lon = (local_bounds[0] + local_bounds[2]) / 2
         center_lat = (local_bounds[1] + local_bounds[3]) / 2
@@ -1570,7 +1579,6 @@ class SMPGenerator:
         if self.feedback and total_tiles > 0:
             self.feedback.setProgress(0)
 
-        source_labels = self._source_label_map(source_plans)
         _current_source = [None]
 
         def iter_tile_tasks():
