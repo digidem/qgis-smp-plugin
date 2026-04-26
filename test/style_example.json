@@ -54,7 +54,7 @@
         ],
         "smp:maxzoom": 16,
         "smp:sourceFolders": {
-            "mbtiles-source": "0"
+            "mbtiles-source": "s/0"
         }
     },
     "center": [

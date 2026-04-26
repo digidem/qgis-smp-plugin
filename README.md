@@ -55,20 +55,26 @@ produce vector tiles, glyphs, or sprite assets.
 3. Go to `Processing` > `Toolbox` and search for "CoMapeo Map Builder"
 4. Select the "Generate SMP Map" tool
 5. Configure the following parameters:
-   - **Extent**: The geographic area to include in the SMP file
-   - **Minimum zoom level**: The minimum zoom level to include (0-24)
-   - **Maximum zoom level**: The maximum zoom level to include (0-24)
+   - **Extent**: The local-area geographic extent to include in the SMP file
+   - **Minimum zoom level**: The minimum zoom level for the Local detail source (0-24)
+   - **Maximum zoom level**: The maximum zoom level for the Local detail source (0-24)
    - **Tile image format**: PNG, JPG, or WebP format for the generated tiles
    - **JPEG/WebP quality**: Compression quality for JPG/WebP tiles (1-100)
-   - **Include world tiles for low zoom levels**: Adds global base tiles to avoid blank map areas when zoomed out
-   - **World low-zoom coverage (3-5)**: When enabled, world tiles are generated from zoom 0 up to this zoom
+   - **Include World overview source**: Optional full-world context rendered below higher-detail sources (enabled by default for backward compatibility)
+   - **World maximum zoom**: When World is enabled, generates world tiles from zoom 0 through this zoom
+   - **Include Region detail source**: Optional middle-detail source between World and Local
+   - **Region extent**: Optional Region extent that must contain the Local extent when Region is enabled
+   - **Region minimum zoom level** / **Region maximum zoom level**: Zoom range for the Region detail source
    - **Output SMP file**: The location to save the SMP file
 6. Click "Run" to generate the SMP file
 
-When **Include world tiles for low zoom levels** is enabled, zoom levels `0..2`
-are always exported as full-world tiles, and world coverage can be extended up
-to zoom `3..5` with **World low-zoom coverage (3-5)**. Higher zoom levels
-continue to use the selected extent.
+When **Include World overview source** is enabled, zoom levels `0..WORLD_MAX_ZOOM`
+are exported as full-world tiles on source slot `s/0`. When **Include Region detail
+source** is enabled, it occupies source slot `s/1` for its configured zoom range.
+If both World and Region are disabled, the selected Local extent uses the legacy
+single-source contract on source slot `s/0` with source id `mbtiles-source`.
+When either World or Region is enabled, the selected Local extent renders on source
+slot `s/2`, above the optional World and Region sources.
 
 The plugin renders visible project layers in QGIS layer-tree order, and uses
 custom layer order when that project setting is enabled.

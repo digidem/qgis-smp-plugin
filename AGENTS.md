@@ -6,7 +6,7 @@ Operational instructions for coding agents working in this repository.
 
 - Keep changes focused and minimal for the requested task.
 - Preserve QGIS Processing parameter IDs in `comapeo_smp_algorithm.py` unless a migration is explicitly requested.
-- Parameter IDs to keep stable: `EXTENT`, `MIN_ZOOM`, `MAX_ZOOM`, `TILE_FORMAT`, `JPEG_QUALITY`, `OUTPUT_FILE`.
+- Parameter IDs to keep stable: `EXTENT`, `MIN_ZOOM`, `MAX_ZOOM`, `TILE_FORMAT`, `JPEG_QUALITY`, `OUTPUT_FILE`, `INCLUDE_WORLD_BASE_ZOOMS`, `WORLD_MAX_ZOOM`, `INCLUDE_REGION`, `REGION_EXTENT`, `REGION_MIN_ZOOM`, `REGION_MAX_ZOOM`.
 - Add or update tests when changing tile math, bounds logic, thresholds, or parameter validation.
 - Add or update tests when changing cancellation, cache/resume behavior, archive contents, or layer selection/order.
 - Keep `.smp` archives free of internal cache artifacts such as `_cache_meta.json`, and ensure cache-backed exports only package tiles for the current run.
@@ -82,15 +82,19 @@ builds the plugin zip via `git archive`, and attaches it to the release.
   `make test-logic`, or `PYTHONPATH=. python3 test/test_generator.py`
 - Headless QGIS integration test (uses real QGIS bindings, no GUI):
   `./scripts/test-qgis-headless.py` — verifies CRS transforms, style
-  generation, archive build, dedup, and cancellation in an actual QGIS
-  runtime. Uses system Python (`/usr/bin/python3`) which has PyQt5 and
-  QGIS bindings. Requires `QT_QPA_PLATFORM=offscreen`.
+  generation, archive build, dedup, and cancellation. Requires
+  `QT_QPA_PLATFORM=offscreen`.
 - Install plugin into local QGIS for manual testing: `./install-dev.sh`
   then reload in QGIS (Plugin Reloader or restart).
 - Full legacy QGIS test command (requires QGIS Python env + `nosetests`):
   `make test-legacy`
 - Lint command (non-blocking by Makefile design): `make pylint`
 - Style command (non-blocking by Makefile design): `make pep8`
+- **CI lint check (must pass):** `make flake8` — this is what the
+  GitHub Actions `lint` workflow runs (`flake8 --count --show-source
+  --statistics .`). Config is in `setup.cfg` `[flake8]` section.
+  Run this locally before pushing; `make pylint` and `make pep8` are
+  advisory only and do **not** match the CI gate.
 - Security scan: `make bandit` (screen) or `make bandit-report` (JSON file)
 - Package build: `make package VERSION=X.Y.Z`
 
@@ -114,6 +118,7 @@ builds the plugin zip via `git archive`, and attaches it to the release.
 
 - Changed code is scoped to the request and avoids unrelated refactors.
 - Relevant tests were added/updated for behavioral changes.
+- `make flake8` passes (this is the CI gate; `make pylint`/`make pep8` are advisory).
 - At least one verification command was executed and results were reported.
 - Documentation updated if parameters, output format, or workflow changed.
 - Version/changelog updates in `metadata.txt` only when release work is requested.
@@ -121,7 +126,7 @@ builds the plugin zip via `git archive`, and attaches it to the release.
 ## When Stuck
 
 - If QGIS runtime is unavailable, run `PYTHONPATH=. python3 test/test_generator.py` and clearly note QGIS-dependent gaps.
-- For headless QGIS testing (real CRS transforms, style generation, archive build): `./scripts/test-qgis-headless.py` — uses system Python (`/usr/bin/python3`) with QGIS bindings, runs offscreen.
+- For headless QGIS testing (real CRS transforms, style generation, archive build): `./scripts/test-qgis-headless.py` — requires `QT_QPA_PLATFORM=offscreen`.
 - If `python3 -m unittest test...` fails outside a QGIS Python environment,
   remember that `test/__init__.py` imports `qgis` eagerly; that failure does
   not invalidate the QGIS-free logic tests.
@@ -137,3 +142,14 @@ builds the plugin zip via `git archive`, and attaches it to the release.
 - No sycophantic openers or closing fluff.
 - Keep solutions simple and direct.
 - User instructions always override this file.
+
+
+<!-- caveman-directive -->
+
+Terse like caveman. Technical substance exact. Only fluff die.
+Drop: articles, filler (just/really/basically), pleasantries, hedging.
+Fragments OK. Short synonyms. Code unchanged.
+Pattern: [thing] [action] [reason]. [next step].
+ACTIVE EVERY RESPONSE. No revert after many turns. No filler drift.
+Code/commits/PRs: normal. Off: "stop caveman" @[/] "normal mode".
+

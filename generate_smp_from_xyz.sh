@@ -98,7 +98,7 @@ select selected_folder in "${options[@]}"; do
     "smp:bounds": [-73.740234375, -7.231698708367133, -69.3896484375, -4.346411275333186],
     "smp:maxzoom": $max_zoom,
     "smp:sourceFolders": {
-      "mbtiles-source": "0"
+      "mbtiles-source": "s/0"
     }
   },
   "center": [-71.56494140625, -5.7890549918501595],

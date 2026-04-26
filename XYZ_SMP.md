@@ -100,7 +100,7 @@ temp_<name>_<timestamp>/
 └── style.json          # MapLibre style
 ```
 
-**Note:** The `s/0/` structure is required by SMP format:
+**Note:** The simple single-source SMP layout uses `s/0/`:
 - `s/` = sources directory
 - `0/` = encoded source ID (matches `smp:sourceFolders` in metadata)
 
@@ -165,7 +165,7 @@ Creates a MapLibre GL JS style specification:
     "smp:bounds": [-73.74, -7.23, -69.38, -4.34],
     "smp:maxzoom": <max_zoom>,
     "smp:sourceFolders": {
-      "mbtiles-source": "0"
+      "mbtiles-source": "s/0"
     }
   }
 }
@@ -173,7 +173,7 @@ Creates a MapLibre GL JS style specification:
 
 **Key fields:**
 - **`sources.*.tiles`**: Uses `smp://` protocol pointing to `s/0/{z}/{x}/{y}.jpg`
-- **`metadata.smp:sourceFolders`**: Maps source ID to folder name (`"0"`)
+- **`metadata.smp:sourceFolders`**: Maps source ID to folder path (`"s/0"`)
 - **`bounds`**: Geographic extent in WGS84 (currently hardcoded for Javari region)
 - **`maxzoom`**: Automatically detected from folder structure
 
@@ -221,7 +221,7 @@ When extracted, the SMP contains:
 ```
 style.json              # MapLibre style specification
 s/
-└── 0/                  # Source tiles
+└── 0/                  # Single-source tiles
     ├── 0/              # Zoom levels
     │   └── 0/
     │       └── 0.jpg
@@ -230,7 +230,9 @@ s/
     └── <max_zoom>/
 ```
 
-## Customization
+The helper script documents the legacy single-source archive shape. The main plugin's
+multi-source export flow uses fixed slots `s/0`, `s/1`, and `s/2` when World and/or
+Region are enabled.
 
 ### Changing Geographic Bounds
 
@@ -268,7 +270,7 @@ name="custom-prefix-${folder_name}-${current_year}-z${max_zoom}"
 
 To support multiple tile sources, you would need to:
 1. Create additional folders under `s/` (e.g., `s/1/`, `s/2/`)
-2. Add more sources to style.json
+2. Add more sources to style.json (for example `world-overview` on `s/0`, `region-detail` on `s/1`, and `local-detail` on `s/2`)
 3. Update `smp:sourceFolders` metadata mapping
 
 ## Differences from QGIS Plugin
