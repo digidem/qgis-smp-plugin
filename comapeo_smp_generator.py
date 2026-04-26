@@ -667,6 +667,12 @@ class SMPGenerator:
         # Fixed-slot assignment: World=0, Region=1, Local=2.
         # When world or region is disabled, those slots are simply absent
         # (sparse indices are intentional — SMP consumers must handle gaps).
+        #
+        # Local-only backward compat: when neither world nor region is enabled,
+        # the local source uses the legacy "mbtiles-source" source_id on slot
+        # s/0 so that existing SMP consumers that predate the fixed-slot spec
+        # continue to work.  When world or region IS enabled, local uses
+        # "local-detail" on s/2 per the fixed-slot contract.
         if include_region:
             region_plan = self._build_single_source_plan(
                 region_extent,
