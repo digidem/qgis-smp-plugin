@@ -361,16 +361,31 @@ class TestWorldBaseZooms(unittest.TestCase):
         )
         self.assertEqual(mixed_count, expected)
 
-    def test_world_zoom_selection_helper_enforces_world_0_to_2(self):
+    def test_world_zoom_selection_helper_respects_world_max_zoom(self):
         custom_world = _FakeRectangle(-180, -85, 180, 85)
+        chosen_at_zoom1 = self.gen._get_extent_for_zoom(
+            self.user_extent, custom_world, 1, include_world_base_zooms=True, world_max_zoom=1
+        )
         chosen_at_zoom2 = self.gen._get_extent_for_zoom(
-            self.user_extent, custom_world, 2, include_world_base_zooms=True, world_max_zoom=3
+            self.user_extent, custom_world, 2, include_world_base_zooms=True, world_max_zoom=1
         )
-        chosen_at_zoom4 = self.gen._get_extent_for_zoom(
-            self.user_extent, custom_world, 4, include_world_base_zooms=True, world_max_zoom=3
+        self.assertIs(chosen_at_zoom1, custom_world)
+        self.assertIs(chosen_at_zoom2, self.user_extent)
+
+    def test_export_zoom_helper_respects_world_max_zoom_below_two(self):
+        export_zooms = self.gen._get_export_zooms(
+            6, 7, include_world_base_zooms=True, world_max_zoom=1
         )
-        self.assertIs(chosen_at_zoom2, custom_world)
-        self.assertIs(chosen_at_zoom4, self.user_extent)
+        self.assertEqual(export_zooms, [0, 1, 6, 7])
+
+    def test_export_range_helper_respects_world_max_zoom_below_two(self):
+        ranges = list(self.gen._iter_export_ranges(
+            self.user_extent, 6, 7, include_world_base_zooms=True, world_max_zoom=1
+        ))
+        self.assertEqual([zoom for zoom, _, _ in ranges], [0, 1, 6, 7])
+        self.assertIs(ranges[0][1], self.world_extent)
+        self.assertIs(ranges[1][1], self.world_extent)
+        self.assertIs(ranges[2][1], self.user_extent)
 
 class TestValidateTileCount(unittest.TestCase):
     """Test validate_tile_count raises/warns correctly."""

@@ -327,7 +327,7 @@ class SMPGenerator:
     def _get_extent_for_zoom(self, extent, world_extent, zoom,
                              include_world_base_zooms=False, world_max_zoom=3):
         """Return per-zoom extent according to world-base-zooms options."""
-        if include_world_base_zooms and zoom <= max(2, world_max_zoom):
+        if include_world_base_zooms and zoom <= world_max_zoom:
             return world_extent
         return extent
 
@@ -336,7 +336,7 @@ class SMPGenerator:
         """Return sorted zoom levels to export."""
         zooms = set(range(min_zoom, max_zoom + 1))
         if include_world_base_zooms:
-            zooms.update(range(0, max(2, world_max_zoom) + 1))
+            zooms.update(range(0, world_max_zoom + 1))
         return sorted(zooms)
 
     def _iter_export_ranges(self, extent, min_zoom, max_zoom,
