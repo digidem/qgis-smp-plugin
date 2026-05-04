@@ -2251,6 +2251,97 @@ class TestCheckParameterValues(unittest.TestCase):
         self.assertEqual(len(world_calls), 1)
         self.assertTrue(world_calls[0].kwargs['defaultValue'])
 
+    def test_region_parameter_help_explains_default_zoom_order(self):
+        """Region UI help should make the default zoom conflict actionable."""
+        algo = self._make_algorithm()
+        algo.addParameter = MagicMock()
+
+        def parameter_factory(*args, **kwargs):
+            parameter = MagicMock()
+            parameter.parameter_id = args[0]
+            return parameter
+
+        bool_ctor = algo.initAlgorithm.__globals__['QgsProcessingParameterBoolean']
+        extent_ctor = algo.initAlgorithm.__globals__['QgsProcessingParameterExtent']
+        number_ctor = algo.initAlgorithm.__globals__['QgsProcessingParameterNumber']
+        bool_ctor.reset_mock()
+        extent_ctor.reset_mock()
+        number_ctor.reset_mock()
+        bool_ctor.side_effect = parameter_factory
+        extent_ctor.side_effect = parameter_factory
+        number_ctor.side_effect = parameter_factory
+
+        algo.initAlgorithm(None)
+
+        region_params = [
+            call.args[0] for call in algo.addParameter.call_args_list
+            if getattr(call.args[0], 'parameter_id', None) in (
+                algo.INCLUDE_REGION,
+                algo.REGION_EXTENT,
+                algo.REGION_MIN_ZOOM,
+                algo.REGION_MAX_ZOOM,
+            )
+        ]
+        self.assertEqual(len(region_params), 4)
+        include_region_param = next(
+            param for param in region_params
+            if param.parameter_id == algo.INCLUDE_REGION
+        )
+        help_text = include_region_param.setHelp.call_args.args[0]
+        self.assertIn('World maximum zoom < Region minimum zoom', help_text)
+        self.assertIn('set Local minimum zoom to 10', help_text)
+
+    def test_world_max_zoom_parameter_is_optional(self):
+        """World maximum zoom should not remain required when World is disabled."""
+        algo = self._make_algorithm()
+        algo.addParameter = MagicMock()
+        number_ctor = algo.initAlgorithm.__globals__['QgsProcessingParameterNumber']
+        number_ctor.reset_mock()
+
+        algo.initAlgorithm(None)
+
+        world_zoom_calls = [
+            call for call in number_ctor.call_args_list
+            if call.args and call.args[0] == algo.WORLD_MAX_ZOOM
+        ]
+        self.assertEqual(len(world_zoom_calls), 1)
+        self.assertTrue(world_zoom_calls[0].kwargs['optional'])
+
+    def test_source_configuration_ignores_world_zoom_when_world_disabled(self):
+        """Disabled World should carry a default zoom without reading the optional input."""
+        algo = self._make_algorithm()
+
+        def bool_value(_p, key, _c):
+            return False
+
+        def int_value(_p, key, _c):
+            if key == algo.WORLD_MAX_ZOOM:
+                raise AssertionError('WORLD_MAX_ZOOM should not be read when World is disabled')
+            return 0
+
+        algo.parameterAsBool = MagicMock(side_effect=bool_value)
+        algo.parameterAsInt = MagicMock(side_effect=int_value)
+
+        config = algo._source_configuration({}, MagicMock())
+
+        self.assertFalse(config['include_world_base_zooms'])
+        self.assertEqual(config['world_max_zoom'], 3)
+
+    def test_source_configuration_defaults_unset_world_zoom_when_enabled(self):
+        """Enabled World keeps a sensible default if the optional zoom input is blank."""
+        algo = self._make_algorithm()
+
+        def bool_value(_p, key, _c):
+            return key == algo.INCLUDE_WORLD_BASE_ZOOMS
+
+        algo.parameterAsBool = MagicMock(side_effect=bool_value)
+        algo.parameterAsInt = MagicMock(return_value=None)
+
+        config = algo._source_configuration({}, MagicMock())
+
+        self.assertTrue(config['include_world_base_zooms'])
+        self.assertEqual(config['world_max_zoom'], 3)
+
     def test_non_integer_enum_value_blocked(self):
         algo = self._make_algorithm()
         extent = self._make_extent(0, 0, 1, 1)

@@ -198,7 +198,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                 self.tr('World maximum zoom'),
                 QgsProcessingParameterNumber.Integer,
                 defaultValue=3,
-                optional=False,
+                optional=True,
                 minValue=0,
                 maxValue=24
             )
@@ -315,10 +315,16 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
             parameters, self.INCLUDE_WORLD_BASE_ZOOMS, context
         )
         include_region = self.parameterAsBool(parameters, self.INCLUDE_REGION, context)
+        world_max_zoom = (
+            self.parameterAsInt(parameters, self.WORLD_MAX_ZOOM, context)
+            if include_world_base_zooms else 3
+        )
+        if world_max_zoom is None:
+            world_max_zoom = 3
 
         return {
             'include_world_base_zooms': include_world_base_zooms,
-            'world_max_zoom': self.parameterAsInt(parameters, self.WORLD_MAX_ZOOM, context),
+            'world_max_zoom': world_max_zoom,
             'include_region': include_region,
             'region_extent': self._region_extent_value(parameters, context) if include_region else None,
             'region_min_zoom': (
