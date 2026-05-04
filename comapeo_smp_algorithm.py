@@ -92,6 +92,33 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                 return cls.TILE_FORMAT_OPTIONS.index(tile_format)
         return cls.TILE_FORMAT_OPTIONS.index(SMPGenerator.TILE_FORMAT_PNG)
 
+    def _set_help(self, parameter, help_text):
+        """Set parameter help when supported by the QGIS runtime."""
+        if hasattr(parameter, 'setHelp'):
+            parameter.setHelp(self.tr(help_text))
+        return parameter
+
+    def _source_configuration_error_message(self, message):
+        if 'Region maximum zoom' in message and 'Local minimum zoom' in message:
+            return (
+                message + ' ' +
+                self.tr(
+                    'Region requires World maximum zoom < Region minimum zoom <= '
+                    'Region maximum zoom < Local minimum zoom. With the default '
+                    'Region zoom range (6-9), set Local minimum zoom to 10 or '
+                    'lower Region maximum zoom before running.'
+                )
+            )
+        if 'World maximum zoom' in message and 'Region minimum zoom' in message:
+            return (
+                message + ' ' +
+                self.tr(
+                    'Region requires World maximum zoom < Region minimum zoom <= '
+                    'Region maximum zoom < Local minimum zoom.'
+                )
+            )
+        return message
+
     def initAlgorithm(self, config):
         """
         Here we define the inputs and output of the algorithm, along
@@ -178,43 +205,58 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
         )
 
         self.addParameter(
-            QgsProcessingParameterBoolean(
-                self.INCLUDE_REGION,
-                self.tr('Include Region detail source'),
-                defaultValue=False,
-                optional=False
+            self._set_help(
+                QgsProcessingParameterBoolean(
+                    self.INCLUDE_REGION,
+                    self.tr('Include Region detail source'),
+                    defaultValue=False,
+                    optional=False
+                ),
+                'Region requires World maximum zoom < Region minimum zoom <= '
+                'Region maximum zoom < Local minimum zoom. With default Region '
+                'zooms 6-9, set Local minimum zoom to 10 before enabling Region.'
             )
         )
 
         self.addParameter(
-            QgsProcessingParameterExtent(
-                self.REGION_EXTENT,
-                self.tr('Region extent'),
-                optional=True
+            self._set_help(
+                QgsProcessingParameterExtent(
+                    self.REGION_EXTENT,
+                    self.tr('Region extent'),
+                    optional=True
+                ),
+                'Required when Region is enabled. The Region extent must fully '
+                'contain the Local extent.'
             )
         )
 
         self.addParameter(
-            QgsProcessingParameterNumber(
-                self.REGION_MIN_ZOOM,
-                self.tr('Region minimum zoom level'),
-                QgsProcessingParameterNumber.Integer,
-                defaultValue=6,
-                optional=True,
-                minValue=0,
-                maxValue=24
+            self._set_help(
+                QgsProcessingParameterNumber(
+                    self.REGION_MIN_ZOOM,
+                    self.tr('Region minimum zoom level'),
+                    QgsProcessingParameterNumber.Integer,
+                    defaultValue=6,
+                    optional=True,
+                    minValue=0,
+                    maxValue=24
+                ),
+                'Must be greater than World maximum zoom when World is enabled.'
             )
         )
 
         self.addParameter(
-            QgsProcessingParameterNumber(
-                self.REGION_MAX_ZOOM,
-                self.tr('Region maximum zoom level'),
-                QgsProcessingParameterNumber.Integer,
-                defaultValue=9,
-                optional=True,
-                minValue=0,
-                maxValue=24
+            self._set_help(
+                QgsProcessingParameterNumber(
+                    self.REGION_MAX_ZOOM,
+                    self.tr('Region maximum zoom level'),
+                    QgsProcessingParameterNumber.Integer,
+                    defaultValue=9,
+                    optional=True,
+                    minValue=0,
+                    maxValue=24
+                ),
+                'Must be less than Local minimum zoom.'
             )
         )
 
@@ -331,7 +373,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                 **fixed_source_options
             )
         except ValueError as exc:
-            return False, self.tr(str(exc))
+            return False, self._source_configuration_error_message(self.tr(str(exc)))
 
         tile_count = export_plan['total_tiles']
 

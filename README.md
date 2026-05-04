@@ -64,13 +64,16 @@ produce vector tiles, glyphs, or sprite assets.
    - **World maximum zoom**: When World is enabled, generates world tiles from zoom 0 through this zoom
    - **Include Region detail source**: Optional middle-detail source between World and Local
    - **Region extent**: Optional Region extent that must contain the Local extent when Region is enabled
-   - **Region minimum zoom level** / **Region maximum zoom level**: Zoom range for the Region detail source
+   - **Region minimum zoom level** / **Region maximum zoom level**: Zoom range for the Region detail source; Region requires `WORLD_MAX_ZOOM < REGION_MIN_ZOOM <= REGION_MAX_ZOOM < MIN_ZOOM`
    - **Output SMP file**: The location to save the SMP file
 6. Click "Run" to generate the SMP file
 
 When **Include World overview source** is enabled, zoom levels `0..WORLD_MAX_ZOOM`
 are exported as full-world tiles on source slot `s/0`. When **Include Region detail
 source** is enabled, it occupies source slot `s/1` for its configured zoom range.
+With the defaults (`MIN_ZOOM=4`, `WORLD_MAX_ZOOM=3`, Region `6..9`), enable
+Region only after either raising **Minimum zoom level** to `10` or lowering
+**Region maximum zoom level** below the Local minimum zoom.
 If both World and Region are disabled, the selected Local extent uses the legacy
 single-source contract on source slot `s/0` with source id `mbtiles-source`.
 When either World or Region is enabled, the selected Local extent renders on source

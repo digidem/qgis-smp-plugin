@@ -2383,6 +2383,44 @@ class TestCheckParameterValues(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(msg, '')
 
+    def test_region_enabled_defaults_report_actionable_zoom_guidance(self):
+        """Toggling Region on with current defaults should explain the needed zoom change."""
+        algo = self._make_algorithm()
+        local_extent = self._make_extent(0, 0, 1, 1)
+        region_extent = self._make_extent(-1, -1, 2, 2)
+
+        int_values = {
+            algo.MIN_ZOOM: 4,
+            algo.MAX_ZOOM: 14,
+            algo.WORLD_MAX_ZOOM: 3,
+            algo.REGION_MIN_ZOOM: 6,
+            algo.REGION_MAX_ZOOM: 9,
+        }
+
+        def bool_value(_p, key, _c):
+            return key in (algo.INCLUDE_WORLD_BASE_ZOOMS, algo.INCLUDE_REGION)
+
+        def extent_value(_p, key, _c):
+            if key == algo.REGION_EXTENT:
+                return region_extent
+            return local_extent
+
+        algo.parameterAsExtent = MagicMock(side_effect=extent_value)
+        algo.parameterAsInt = MagicMock(side_effect=lambda _p, key, _c: int_values[key])
+        algo.parameterAsBool = MagicMock(side_effect=bool_value)
+
+        import comapeo_smp_generator as _gen_mod
+        with patch.object(_gen_mod.SMPGenerator, '_get_bounds_wgs84',
+                          side_effect=lambda extent: [
+                              extent.xMinimum(), extent.yMinimum(),
+                              extent.xMaximum(), extent.yMaximum()
+                          ]):
+            ok, msg = algo.checkParameterValues({}, MagicMock())
+
+        self.assertFalse(ok)
+        self.assertIn('Region maximum zoom (9) must be less than Local minimum zoom (4)', msg)
+        self.assertIn('set Local minimum zoom to 10', msg)
+
     def test_empty_extent_skips_generator(self):
         """An empty extent should not call the generator (return True to let processAlgorithm handle it)."""
         algo = self._make_algorithm()
