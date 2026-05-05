@@ -78,7 +78,7 @@ Since CoMapeo uses `@rnmapbox/maps` (Mapbox SDK), also test with Mapbox GL JS to
 2. Generate two SMPs using the current plugin's world/region split, configured so the breakpoint aligns with the rendering change:
    - World source: zoom 0–9 (shows polygons)
    - Region source: zoom 10–14 (shows points)
-   
+
    Alternatively, manually construct a multi-source SMP by:
    - Generating one SMP for zoom 0–9
    - Generating another SMP for zoom 10–14

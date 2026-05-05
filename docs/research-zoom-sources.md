@@ -108,21 +108,21 @@ All necessary APIs exist in QGIS Python bindings:
 ```python
 def _detect_rendering_breakpoints(self, layers, min_zoom, max_zoom):
     """Return list of (zoom_min, zoom_max, layer_config_signature) tuples."""
-    
+
     # Step 1: Collect all scale boundaries from all layers
     scale_breakpoints = set()
     for layer in layers:
         if layer.hasScaleBasedVisibility():
             scale_breakpoints.add(layer.minimumScale())
             scale_breakpoints.add(layer.maximumScale())
-        
+
         renderer = layer.renderer()
         if isinstance(renderer, QgsRuleBasedRenderer):
             for rule in renderer.rootRule().descendants():
                 if rule.dependsOnScale():
                     scale_breakpoints.add(rule.maximumScale())
                     scale_breakpoints.add(rule.minimumScale())
-        
+
         if hasattr(layer, 'labeling') and layer.labeling():
             labeling = layer.labeling()
             if isinstance(labeling, QgsVectorLayerSimpleLabeling):
@@ -136,14 +136,14 @@ def _detect_rendering_breakpoints(self, layers, min_zoom, max_zoom):
                     if rule.dependsOnScale():
                         scale_breakpoints.add(rule.maximumScale())
                         scale_breakpoints.add(rule.minimumScale())
-    
+
     # Step 2: Convert scale breakpoints to zoom levels
     zoom_breakpoints = set()
     for scale in scale_breakpoints:
         if scale > 0:
             zoom = max(0, int(math.log2(559082264.028 / scale)))
             zoom_breakpoints.add(zoom)
-    
+
     # Step 3: For each zoom range, compute a "rendering signature"
     all_zooms = sorted(set(range(min_zoom, max_zoom + 1)) | zoom_breakpoints)
     groups = []
