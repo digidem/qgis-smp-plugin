@@ -41,7 +41,13 @@ from qgis.core import (QgsProcessingAlgorithm,
                        QgsProcessingException,
                        QgsProject)
 
-from .comapeo_smp_generator import SMPGenerator
+from .comapeo_smp_generator import (
+    SMPGenerator,
+    _ZOOM_LABEL_LOCAL_MIN,
+    _ZOOM_LABEL_REGION_MAX,
+    _ZOOM_LABEL_REGION_MIN,
+    _ZOOM_LABEL_WORLD_MAX,
+)
 
 
 class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
@@ -99,7 +105,10 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
         return parameter
 
     def _source_configuration_error_message(self, message):
-        if 'Region maximum zoom' in message and 'Local minimum zoom' in message:
+        if (
+            _ZOOM_LABEL_REGION_MAX in message
+            and _ZOOM_LABEL_LOCAL_MIN in message
+        ):
             return (
                 message + ' ' +
                 self.tr(
@@ -109,7 +118,10 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                     'lower Region maximum zoom before running.'
                 )
             )
-        if 'World maximum zoom' in message and 'Region minimum zoom' in message:
+        if (
+            _ZOOM_LABEL_WORLD_MAX in message
+            and _ZOOM_LABEL_REGION_MIN in message
+        ):
             return (
                 message + ' ' +
                 self.tr(

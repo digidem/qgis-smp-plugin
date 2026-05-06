@@ -28,6 +28,13 @@ from qgis.PyQt.QtGui import QImage, QPainter, QImageWriter
 
 # Warn if estimated tile count exceeds this threshold
 TILE_COUNT_WARNING_THRESHOLD = 5000
+# Shared label substrings used in fixed-source configuration error messages.
+# Algorithm-level error matching imports these so the coupling is explicit
+# rather than depending on duplicated literal strings.
+_ZOOM_LABEL_WORLD_MAX = 'World maximum zoom'
+_ZOOM_LABEL_REGION_MIN = 'Region minimum zoom'
+_ZOOM_LABEL_REGION_MAX = 'Region maximum zoom'
+_ZOOM_LABEL_LOCAL_MIN = 'Local minimum zoom'
 # Estimated bytes per tile (PNG ~50 KB, JPG ~15 KB)
 BYTES_PER_TILE_PNG = 50 * 1024
 BYTES_PER_TILE_JPG = 15 * 1024
@@ -567,16 +574,18 @@ class SMPGenerator:
                 raise ValueError('Local extent must be fully contained within the Region extent.')
             if include_world_base_zooms and world_max_zoom >= region_min_zoom:
                 raise ValueError(
-                    f"World maximum zoom ({world_max_zoom}) must be less than Region minimum zoom ({region_min_zoom})."
+                    f"{_ZOOM_LABEL_WORLD_MAX} ({world_max_zoom}) must be less than "
+                    f"{_ZOOM_LABEL_REGION_MIN} ({region_min_zoom})."
                 )
             if region_max_zoom >= min_zoom:
                 raise ValueError(
-                    f"Region maximum zoom ({region_max_zoom}) must be less than Local minimum zoom ({min_zoom})."
+                    f"{_ZOOM_LABEL_REGION_MAX} ({region_max_zoom}) must be less than "
+                    f"{_ZOOM_LABEL_LOCAL_MIN} ({min_zoom})."
                 )
         elif include_world_base_zooms and world_max_zoom >= min_zoom:
             raise ValueError(
-                f"World maximum zoom ({world_max_zoom}) must be less than "
-                f"Local minimum zoom ({min_zoom}) when Region is disabled."
+                f"{_ZOOM_LABEL_WORLD_MAX} ({world_max_zoom}) must be less than "
+                f"{_ZOOM_LABEL_LOCAL_MIN} ({min_zoom}) when Region is disabled."
             )
 
     @staticmethod
