@@ -2462,9 +2462,7 @@ class TestCheckParameterValues(unittest.TestCase):
         algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
 
         import comapeo_smp_generator as _gen_mod
-        with patch.object(_gen_mod.SMPGenerator, 'validate_tile_count',
-                          return_value=(10, None)), \
-             patch.object(_gen_mod.SMPGenerator, 'validate_disk_space'), \
+        with patch.object(_gen_mod.SMPGenerator, 'validate_disk_space'), \
              patch.object(_gen_mod.SMPGenerator, 'get_world_extent',
                           return_value=_FakeRectangle(-180, -85.0511, 180, 85.0511)), \
              patch.object(_gen_mod.SMPGenerator, '_get_bounds_wgs84',
