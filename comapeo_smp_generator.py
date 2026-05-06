@@ -1178,9 +1178,7 @@ class SMPGenerator:
     def _create_style_from_canvas(
             self, extent, min_zoom, max_zoom, tile_format=None,
             include_world_base_zooms=False, world_max_zoom=3,
-            source_plans=None,
-            include_region=False, region_extent=None,
-            region_min_zoom=None, region_max_zoom=None):
+            source_plans=None):
         """
         Create a MapLibre style JSON from the current map canvas
 
@@ -1189,10 +1187,6 @@ class SMPGenerator:
         :param max_zoom: Maximum zoom level
         :param tile_format: Tile image format ('PNG' or 'JPG')
         :param source_plans: Optional list of per-source plan dicts for fixed-slot multi-source
-        :param include_region: Whether region detail is enabled
-        :param region_extent: Optional region extent (requires include_region)
-        :param region_min_zoom: Optional region minimum zoom
-        :param region_max_zoom: Optional region maximum zoom
         :return: Style JSON object
         """
         if tile_format is None:
@@ -1201,11 +1195,6 @@ class SMPGenerator:
         tile_ext = self._tile_extension(tile_format)
 
         if source_plans is None:
-            if include_region:
-                raise ValueError(
-                    'source_plans is required when region is enabled. '
-                    'Call _build_export_plan with region parameters first.'
-                )
             export_plan = self._build_export_plan(
                 extent,
                 min_zoom,
