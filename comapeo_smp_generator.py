@@ -337,7 +337,12 @@ class SMPGenerator:
 
     def _get_extent_for_zoom(self, extent, world_extent, zoom,
                              include_world_base_zooms=False, world_max_zoom=3):
-        """Return per-zoom extent according to world-base-zooms options."""
+        """Return per-zoom extent according to world-base-zooms options.
+
+        Legacy helper retained for preview/debug paths (e.g. get_tile_grid_rects).
+        Does not reflect the fixed-slot world/region/local model — do not use on
+        the main export path; consume export_plan['tiles_by_zoom'] instead.
+        """
         if include_world_base_zooms and zoom <= world_max_zoom:
             return world_extent
         return extent
@@ -352,7 +357,12 @@ class SMPGenerator:
 
     def _iter_export_ranges(self, extent, min_zoom, max_zoom,
                             include_world_base_zooms=False, world_max_zoom=3):
-        """Yield `(zoom, zoom_extent, ranges)` for the effective export plan."""
+        """Yield `(zoom, zoom_extent, ranges)` for the effective export plan.
+
+        Legacy helper retained for preview/debug paths (e.g. get_tile_grid_rects).
+        Does not reflect the fixed-slot world/region/local model — do not use on
+        the main export path; consume export_plan['tiles_by_zoom'] instead.
+        """
         world_extent = self.get_world_extent() if include_world_base_zooms else None
         export_zooms = self._get_export_zooms(
             min_zoom, max_zoom,
