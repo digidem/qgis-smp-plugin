@@ -89,6 +89,30 @@ custom layer order when that project setting is enabled.
 - Make sure all layers are properly styled before generating the SMP file
 - Test your SMP file with CoMapeo to ensure it displays correctly
 
+## Migration from earlier versions
+
+This release introduces a fixed source configuration with three slots —
+World, Region, and Local — and enforces strict, non-overlapping zoom ranges.
+Configurations that were valid in earlier versions may now fail validation.
+
+The required ordering is:
+
+```
+world_max_zoom < region_min_zoom <= region_max_zoom < local_min_zoom
+```
+
+World is **enabled by default** for backward compatibility, but its zoom
+range must not overlap Local (or Region, when Region is enabled). Region
+remains optional.
+
+**Example of a config that now fails:** Local **Minimum zoom level** `0`
+with World enabled at **World maximum zoom** `3`. Either re-save with
+Local **Minimum zoom level** `4` or higher (so Local starts above World's
+top zoom), or disable **Include World overview source** if you want Local
+to start at zoom `0`. The same rule applies to any Region range that
+overlaps World or Local — adjust **Region minimum/maximum zoom level** so
+the three ranges remain strictly ordered.
+
 ## Requirements
 
 - QGIS 3.0 or later
