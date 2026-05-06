@@ -2510,6 +2510,38 @@ class TestCheckParameterValues(unittest.TestCase):
         self.assertIn('Region maximum zoom (9) must be less than Local minimum zoom (4)', msg)
         self.assertIn('set Local minimum zoom to 10', msg)
 
+    def test_world_local_overlap_without_region_reports_actionable_hint(self):
+        """World enabled with Region disabled and overlapping zooms should suggest raising Local min."""
+        algo = self._make_algorithm()
+        local_extent = self._make_extent(0, 0, 1, 1)
+
+        int_values = {
+            algo.MIN_ZOOM: 2,
+            algo.MAX_ZOOM: 14,
+            algo.WORLD_MAX_ZOOM: 3,
+            algo.REGION_MIN_ZOOM: 6,
+            algo.REGION_MAX_ZOOM: 9,
+        }
+
+        def bool_value(_p, key, _c):
+            return key == algo.INCLUDE_WORLD_BASE_ZOOMS
+
+        algo.parameterAsExtent = MagicMock(return_value=local_extent)
+        algo.parameterAsInt = MagicMock(side_effect=lambda _p, key, _c: int_values[key])
+        algo.parameterAsBool = MagicMock(side_effect=bool_value)
+
+        import comapeo_smp_generator as _gen_mod
+        with patch.object(_gen_mod.SMPGenerator, '_get_bounds_wgs84',
+                          side_effect=lambda extent: [
+                              extent.xMinimum(), extent.yMinimum(),
+                              extent.xMaximum(), extent.yMaximum()
+                          ]):
+            ok, msg = algo.checkParameterValues({}, MagicMock())
+
+        self.assertFalse(ok)
+        self.assertIn('World maximum zoom (3) must be less than Local minimum zoom (2)', msg)
+        self.assertIn('Raise Local minimum zoom above World maximum zoom', msg)
+
     def test_region_enabled_with_valid_zooms_passes_check_parameter_values(self):
         """Enabling Region with valid world<region<local zooms must pass validation."""
         algo = self._make_algorithm()

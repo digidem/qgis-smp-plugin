@@ -129,6 +129,19 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                     'Region maximum zoom < Local minimum zoom.'
                 )
             )
+        if (
+            _ZOOM_LABEL_WORLD_MAX in message
+            and _ZOOM_LABEL_LOCAL_MIN in message
+            and _ZOOM_LABEL_REGION_MIN not in message
+            and _ZOOM_LABEL_REGION_MAX not in message
+        ):
+            return (
+                message + ' ' +
+                self.tr(
+                    'Raise Local minimum zoom above World maximum zoom, or '
+                    'disable World coverage.'
+                )
+            )
         return message
 
     def initAlgorithm(self, config):
