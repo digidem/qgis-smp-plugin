@@ -2510,6 +2510,48 @@ class TestCheckParameterValues(unittest.TestCase):
         self.assertIn('Region maximum zoom (9) must be less than Local minimum zoom (4)', msg)
         self.assertIn('set Local minimum zoom to 10', msg)
 
+    def test_region_enabled_with_valid_zooms_passes_check_parameter_values(self):
+        """Enabling Region with valid world<region<local zooms must pass validation."""
+        algo = self._make_algorithm()
+        local_extent = self._make_extent(0, 0, 1, 1)
+        region_extent = self._make_extent(-1, -1, 2, 2)
+
+        int_values = {
+            algo.MIN_ZOOM: 7,
+            algo.MAX_ZOOM: 10,
+            algo.WORLD_MAX_ZOOM: 3,
+            algo.REGION_MIN_ZOOM: 4,
+            algo.REGION_MAX_ZOOM: 6,
+        }
+
+        def bool_value(_p, key, _c):
+            return key in (algo.INCLUDE_WORLD_BASE_ZOOMS, algo.INCLUDE_REGION)
+
+        def extent_value(_p, key, _c):
+            if key == algo.REGION_EXTENT:
+                return region_extent
+            return local_extent
+
+        algo.parameterAsExtent = MagicMock(side_effect=extent_value)
+        algo.parameterAsInt = MagicMock(side_effect=lambda _p, key, _c: int_values[key])
+        algo.parameterAsBool = MagicMock(side_effect=bool_value)
+        algo.parameterAsEnum = MagicMock(return_value=0)
+        algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
+
+        import comapeo_smp_generator as _gen_mod
+        with patch.object(_gen_mod.SMPGenerator, 'validate_disk_space'), \
+             patch.object(_gen_mod.SMPGenerator, 'get_world_extent',
+                          return_value=_FakeRectangle(-180, -85.0511, 180, 85.0511)), \
+             patch.object(_gen_mod.SMPGenerator, '_get_bounds_wgs84',
+                          side_effect=lambda extent: [
+                              extent.xMinimum(), extent.yMinimum(),
+                              extent.xMaximum(), extent.yMaximum()
+                          ]):
+            ok, msg = algo.checkParameterValues({}, MagicMock())
+
+        self.assertTrue(ok)
+        self.assertEqual(msg, '')
+
     def test_empty_extent_skips_generator(self):
         """An empty extent should not call the generator (return True to let processAlgorithm handle it)."""
         algo = self._make_algorithm()
