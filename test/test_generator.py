@@ -4202,6 +4202,32 @@ class TestBuildSingleSourcePlan(unittest.TestCase):
         self.assertGreater(plan['total_tiles'], 0)
 
 
+class TestSourceSlotForPlanFallbacks(unittest.TestCase):
+    """Tests for SMPGenerator._source_slot_for_plan fallback tiers."""
+
+    def test_source_slot_for_plan_falls_back_to_index_when_id_unknown(self):
+        slot = SMPGenerator._source_slot_for_plan({
+            'source_id': 'unknown-id',
+            'source_index': 1,
+        })
+        self.assertEqual(slot['role'], 'region')
+        self.assertEqual(slot['name'], 'Region Detail')
+        self.assertEqual(slot['layer_id'], 'region-raster')
+        self.assertEqual(slot['source_index'], 1)
+        self.assertEqual(slot['source_id'], 'unknown-id')
+
+    def test_source_slot_for_plan_synthesizes_slot_when_id_and_index_unknown(self):
+        slot = SMPGenerator._source_slot_for_plan({
+            'source_id': 'unknown',
+            'source_index': 99,
+        })
+        self.assertEqual(slot['role'], 'source-99')
+        self.assertEqual(slot['name'], 'unknown')
+        self.assertEqual(slot['layer_id'], 'source-99-raster')
+        self.assertEqual(slot['source_index'], 99)
+        self.assertEqual(slot['source_id'], 'unknown')
+
+
 class TestMultiSourceExportPlan(unittest.TestCase):
     """Tests for _build_export_plan with separate sources."""
 
