@@ -28,6 +28,10 @@ from qgis.PyQt.QtGui import QImage, QPainter, QImageWriter
 
 # Warn if estimated tile count exceeds this threshold
 TILE_COUNT_WARNING_THRESHOLD = 5000
+# Warn (non-blocking) when world coverage is requested above this zoom because
+# the full world pyramid grows quickly (sum(4**i for i in range(z+1))) and
+# becomes impractical to package.
+WORLD_MAX_ZOOM_WARNING_THRESHOLD = 8
 # Shared label substrings used in fixed-source configuration error messages.
 # Algorithm-level error matching imports these so the coupling is explicit
 # rather than depending on duplicated literal strings.
@@ -719,6 +723,23 @@ class SMPGenerator:
         gap_zooms = self._zoom_gap_levels(export_zooms)
         world_coverage_tiles = self._count_unique_tiles_in_ranges(tiles_by_zoom)
         world_tiles = sum(4 ** zoom for zoom in export_zooms)
+
+        # Non-blocking advisory warnings surfaced to callers (Processing
+        # algorithm forwards them via feedback.pushWarning).
+        warnings = []
+        if (
+            include_world_base_zooms
+            and world_max_zoom > WORLD_MAX_ZOOM_WARNING_THRESHOLD
+        ):
+            full_world_pyramid = sum(4 ** i for i in range(world_max_zoom + 1))
+            warnings.append(
+                f"World maximum zoom ({world_max_zoom}) exceeds the recommended "
+                f"limit of {WORLD_MAX_ZOOM_WARNING_THRESHOLD}: a full world "
+                f"pyramid at this zoom contains {full_world_pyramid:,} tiles, "
+                f"which is impractical to package. Consider lowering "
+                f"World maximum zoom."
+            )
+
         return {
             'export_zooms': export_zooms,
             'gap_zooms': gap_zooms,
@@ -729,6 +750,7 @@ class SMPGenerator:
             'world_pct': (world_coverage_tiles / world_tiles) * 100 if world_tiles else 0,
             'source_bounds': local_plan['source_bounds'],
             'sources': sources,
+            'warnings': warnings,
         }
 
     @staticmethod

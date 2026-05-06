@@ -475,6 +475,9 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
         except ValueError as exc:
             raise QgsProcessingException(self.tr(str(exc)))
 
+        for warning in export_plan.get('warnings', []) or []:
+            feedback.pushWarning(self.tr(warning))
+
         feedback.pushInfo(
             self.tr('Using visible project layers in layer-tree order for rendering')
         )
