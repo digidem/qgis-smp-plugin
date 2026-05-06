@@ -4259,6 +4259,18 @@ class TestSourceSlotForPlanFallbacks(unittest.TestCase):
         self.assertEqual(slot['source_index'], 99)
         self.assertEqual(slot['source_id'], 'unknown')
 
+    def test_source_slot_for_plan_resolves_legacy_mbtiles_source(self):
+        slot = SMPGenerator._source_slot_for_plan({
+            'source_id': 'mbtiles-source',
+            'source_index': 0,
+            'source_role': 'local',
+            'layer_id': 'raster',
+        })
+        self.assertEqual(slot['role'], 'local')
+        self.assertEqual(slot['layer_id'], 'raster')
+        self.assertEqual(slot['source_id'], 'mbtiles-source')
+        self.assertEqual(slot['source_index'], 0)
+
 
 class TestMultiSourceExportPlan(unittest.TestCase):
     """Tests for _build_export_plan with separate sources."""
