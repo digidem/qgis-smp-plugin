@@ -2552,6 +2552,117 @@ class TestCheckParameterValues(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(msg, '')
 
+    def test_region_min_zoom_equals_max_zoom_is_accepted(self):
+        """A single-zoom region (region_min == region_max) should pass validation."""
+        algo = self._make_algorithm()
+        local_extent = self._make_extent(0, 0, 1, 1)
+        region_extent = self._make_extent(-1, -1, 2, 2)
+
+        int_values = {
+            algo.MIN_ZOOM: 7,
+            algo.MAX_ZOOM: 10,
+            algo.WORLD_MAX_ZOOM: 3,
+            algo.REGION_MIN_ZOOM: 5,
+            algo.REGION_MAX_ZOOM: 5,
+        }
+
+        def bool_value(_p, key, _c):
+            return key in (algo.INCLUDE_WORLD_BASE_ZOOMS, algo.INCLUDE_REGION)
+
+        def extent_value(_p, key, _c):
+            if key == algo.REGION_EXTENT:
+                return region_extent
+            return local_extent
+
+        algo.parameterAsExtent = MagicMock(side_effect=extent_value)
+        algo.parameterAsInt = MagicMock(side_effect=lambda _p, key, _c: int_values[key])
+        algo.parameterAsBool = MagicMock(side_effect=bool_value)
+        algo.parameterAsEnum = MagicMock(return_value=0)
+        algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
+
+        import comapeo_smp_generator as _gen_mod
+        with patch.object(_gen_mod.SMPGenerator, 'validate_disk_space'), \
+             patch.object(_gen_mod.SMPGenerator, 'get_world_extent',
+                          return_value=_FakeRectangle(-180, -85.0511, 180, 85.0511)), \
+             patch.object(_gen_mod.SMPGenerator, '_get_bounds_wgs84',
+                          side_effect=lambda extent: [
+                              extent.xMinimum(), extent.yMinimum(),
+                              extent.xMaximum(), extent.yMaximum()
+                          ]):
+            ok, msg = algo.checkParameterValues({}, MagicMock())
+
+        self.assertTrue(ok)
+        self.assertEqual(msg, '')
+
+    def test_world_max_zoom_zero_is_accepted(self):
+        """World enabled with world_max_zoom=0 and region disabled should pass."""
+        algo = self._make_algorithm()
+        local_extent = self._make_extent(0, 0, 1, 1)
+
+        int_values = {
+            algo.MIN_ZOOM: 1,
+            algo.MAX_ZOOM: 5,
+            algo.WORLD_MAX_ZOOM: 0,
+            algo.REGION_MIN_ZOOM: None,
+            algo.REGION_MAX_ZOOM: None,
+        }
+
+        def bool_value(_p, key, _c):
+            return key == algo.INCLUDE_WORLD_BASE_ZOOMS
+
+        algo.parameterAsExtent = MagicMock(return_value=local_extent)
+        algo.parameterAsInt = MagicMock(side_effect=lambda _p, key, _c: int_values[key])
+        algo.parameterAsBool = MagicMock(side_effect=bool_value)
+        algo.parameterAsEnum = MagicMock(return_value=0)
+        algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
+
+        import comapeo_smp_generator as _gen_mod
+        with patch.object(_gen_mod.SMPGenerator, 'validate_disk_space'), \
+             patch.object(_gen_mod.SMPGenerator, 'get_world_extent',
+                          return_value=_FakeRectangle(-180, -85.0511, 180, 85.0511)), \
+             patch.object(_gen_mod.SMPGenerator, '_get_bounds_wgs84',
+                          return_value=[0, 0, 1, 1]):
+            ok, msg = algo.checkParameterValues({}, MagicMock())
+
+        self.assertTrue(ok)
+        self.assertEqual(msg, '')
+
+    def test_region_extent_equal_to_local_extent_is_accepted(self):
+        """Region extent identical to the local extent should pass validation."""
+        algo = self._make_algorithm()
+        shared_extent = self._make_extent(0, 0, 1, 1)
+
+        int_values = {
+            algo.MIN_ZOOM: 7,
+            algo.MAX_ZOOM: 10,
+            algo.WORLD_MAX_ZOOM: 3,
+            algo.REGION_MIN_ZOOM: 4,
+            algo.REGION_MAX_ZOOM: 6,
+        }
+
+        def bool_value(_p, key, _c):
+            return key in (algo.INCLUDE_WORLD_BASE_ZOOMS, algo.INCLUDE_REGION)
+
+        algo.parameterAsExtent = MagicMock(return_value=shared_extent)
+        algo.parameterAsInt = MagicMock(side_effect=lambda _p, key, _c: int_values[key])
+        algo.parameterAsBool = MagicMock(side_effect=bool_value)
+        algo.parameterAsEnum = MagicMock(return_value=0)
+        algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
+
+        import comapeo_smp_generator as _gen_mod
+        with patch.object(_gen_mod.SMPGenerator, 'validate_disk_space'), \
+             patch.object(_gen_mod.SMPGenerator, 'get_world_extent',
+                          return_value=_FakeRectangle(-180, -85.0511, 180, 85.0511)), \
+             patch.object(_gen_mod.SMPGenerator, '_get_bounds_wgs84',
+                          side_effect=lambda extent: [
+                              extent.xMinimum(), extent.yMinimum(),
+                              extent.xMaximum(), extent.yMaximum()
+                          ]):
+            ok, msg = algo.checkParameterValues({}, MagicMock())
+
+        self.assertTrue(ok)
+        self.assertEqual(msg, '')
+
     def test_empty_extent_skips_generator(self):
         """An empty extent should not call the generator (return True to let processAlgorithm handle it)."""
         algo = self._make_algorithm()
