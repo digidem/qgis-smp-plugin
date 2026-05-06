@@ -545,6 +545,24 @@ class TestFixedSourceValidation(unittest.TestCase):
         sig_b = SMPGenerator._source_plan_signature(plan_b)
         self.assertNotEqual(sig_a, sig_b, "Signatures must differ when zoom sets differ")
 
+    def test_source_plan_signature_invariant_to_float_repr_quirks(self):
+        """Equivalent bounds with differing trailing-zero noise must hash to same signature."""
+        plan_a = [{
+            'source_index': 0,
+            'source_id': 'test',
+            'source_bounds': [-1.0, -1.0, 1.0, 1.0],
+            'export_zooms': [0, 1, 2],
+        }]
+        plan_b = [{
+            'source_index': 0,
+            'source_id': 'test',
+            'source_bounds': [float(-1), float(-1), float(1), float(1)],
+            'export_zooms': [0, 1, 2],
+        }]
+        sig_a = SMPGenerator._source_plan_signature(plan_a)
+        sig_b = SMPGenerator._source_plan_signature(plan_b)
+        self.assertEqual(sig_a, sig_b)
+
 
     def test_new_default_params_succeed(self):
         """New defaults (min_zoom=4, world enabled, world_max_zoom=3) must pass."""

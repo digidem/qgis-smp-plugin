@@ -542,7 +542,10 @@ class SMPGenerator:
     def _source_plan_signature(cls, source_plans):
         parts = []
         for source_plan in source_plans:
-            bounds = ','.join(str(value) for value in source_plan.get('source_bounds', []))
+            bounds = ','.join(
+                format(float(value), '.10g')
+                for value in source_plan.get('source_bounds', [])
+            )
             export_zooms = source_plan.get('export_zooms', [])
             if export_zooms:
                 zoom_signature = ','.join(str(z) for z in export_zooms)
