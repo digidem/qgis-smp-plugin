@@ -46,6 +46,7 @@ _ZOOM_LABEL_LOCAL_MIN = 'Local minimum zoom'
 SOURCE_CONFIG_ERROR_REGION_LOCAL_OVERLAP = 'region_local_zoom_overlap'
 SOURCE_CONFIG_ERROR_WORLD_REGION_OVERLAP = 'world_region_zoom_overlap'
 SOURCE_CONFIG_ERROR_WORLD_LOCAL_OVERLAP = 'world_local_zoom_overlap'
+SOURCE_CONFIG_ERROR_REGION_ZOOM_OUT_OF_RANGE = 'region_zoom_out_of_range'
 
 
 class SourceConfigError(ValueError):
@@ -597,6 +598,13 @@ class SMPGenerator:
                 raise ValueError(
                     'Region min/max zoom values are required when INCLUDE_REGION is enabled.'
                 )
+            for label, value in ((_ZOOM_LABEL_REGION_MIN, region_min_zoom),
+                                 (_ZOOM_LABEL_REGION_MAX, region_max_zoom)):
+                if not (0 <= value <= 24):
+                    raise SourceConfigError(
+                        f"{label} ({value}) must be between 0 and 24.",
+                        SOURCE_CONFIG_ERROR_REGION_ZOOM_OUT_OF_RANGE,
+                    )
             if region_min_zoom > region_max_zoom:
                 raise ValueError(
                     f"Region minimum zoom ({region_min_zoom}) must not exceed region maximum zoom ({region_max_zoom})."

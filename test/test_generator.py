@@ -133,6 +133,7 @@ from comapeo_smp_generator import (  # noqa: E402
     SMPGenerator,
     SourceConfigError,
     SOURCE_CONFIG_ERROR_REGION_LOCAL_OVERLAP,
+    SOURCE_CONFIG_ERROR_REGION_ZOOM_OUT_OF_RANGE,
     SOURCE_CONFIG_ERROR_WORLD_LOCAL_OVERLAP,
     SOURCE_CONFIG_ERROR_WORLD_REGION_OVERLAP,
     TileCache,
@@ -602,6 +603,34 @@ class TestFixedSourceValidation(unittest.TestCase):
                 world_max_zoom=3,
             )
         self.assertEqual(ctx.exception.code, SOURCE_CONFIG_ERROR_WORLD_LOCAL_OVERLAP)
+
+    def test_region_min_zoom_below_zero_raises(self):
+        """Programmatic callers bypassing UI clamps must hit the range check."""
+        with self.assertRaises(SourceConfigError) as ctx:
+            self.gen._build_export_plan(
+                self.local_extent, 6, 7,
+                include_region=True,
+                region_extent=self.region_extent,
+                region_min_zoom=-1,
+                region_max_zoom=5,
+            )
+        self.assertEqual(
+            ctx.exception.code, SOURCE_CONFIG_ERROR_REGION_ZOOM_OUT_OF_RANGE
+        )
+
+    def test_region_max_zoom_above_24_raises(self):
+        """Region max zoom > 24 must be rejected when supplied directly."""
+        with self.assertRaises(SourceConfigError) as ctx:
+            self.gen._build_export_plan(
+                self.local_extent, 26, 28,
+                include_region=True,
+                region_extent=self.region_extent,
+                region_min_zoom=4,
+                region_max_zoom=25,
+            )
+        self.assertEqual(
+            ctx.exception.code, SOURCE_CONFIG_ERROR_REGION_ZOOM_OUT_OF_RANGE
+        )
 
 
     def test_new_default_params_succeed(self):
