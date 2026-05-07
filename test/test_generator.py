@@ -133,6 +133,7 @@ from comapeo_smp_generator import (  # noqa: E402
     SMPGenerator,
     SourceConfigError,
     SOURCE_CONFIG_ERROR_REGION_LOCAL_OVERLAP,
+    SOURCE_CONFIG_ERROR_REGION_ZOOM_INVERTED,
     SOURCE_CONFIG_ERROR_REGION_ZOOM_OUT_OF_RANGE,
     SOURCE_CONFIG_ERROR_WORLD_LOCAL_OVERLAP,
     SOURCE_CONFIG_ERROR_WORLD_REGION_OVERLAP,
@@ -630,6 +631,20 @@ class TestFixedSourceValidation(unittest.TestCase):
             )
         self.assertEqual(
             ctx.exception.code, SOURCE_CONFIG_ERROR_REGION_ZOOM_OUT_OF_RANGE
+        )
+
+    def test_region_min_greater_than_max_raises_coded_error(self):
+        """Inverted region zoom range must raise SourceConfigError with stable code."""
+        with self.assertRaises(SourceConfigError) as ctx:
+            self.gen._build_export_plan(
+                self.local_extent, 8, 10,
+                include_region=True,
+                region_extent=self.region_extent,
+                region_min_zoom=6,
+                region_max_zoom=4,
+            )
+        self.assertEqual(
+            ctx.exception.code, SOURCE_CONFIG_ERROR_REGION_ZOOM_INVERTED
         )
 
 

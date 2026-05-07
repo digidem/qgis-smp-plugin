@@ -47,6 +47,7 @@ SOURCE_CONFIG_ERROR_REGION_LOCAL_OVERLAP = 'region_local_zoom_overlap'
 SOURCE_CONFIG_ERROR_WORLD_REGION_OVERLAP = 'world_region_zoom_overlap'
 SOURCE_CONFIG_ERROR_WORLD_LOCAL_OVERLAP = 'world_local_zoom_overlap'
 SOURCE_CONFIG_ERROR_REGION_ZOOM_OUT_OF_RANGE = 'region_zoom_out_of_range'
+SOURCE_CONFIG_ERROR_REGION_ZOOM_INVERTED = 'region_zoom_inverted'
 
 
 class SourceConfigError(ValueError):
@@ -606,8 +607,10 @@ class SMPGenerator:
                         SOURCE_CONFIG_ERROR_REGION_ZOOM_OUT_OF_RANGE,
                     )
             if region_min_zoom > region_max_zoom:
-                raise ValueError(
-                    f"Region minimum zoom ({region_min_zoom}) must not exceed region maximum zoom ({region_max_zoom})."
+                raise SourceConfigError(
+                    f"{_ZOOM_LABEL_REGION_MIN} ({region_min_zoom}) must not exceed "
+                    f"{_ZOOM_LABEL_REGION_MAX} ({region_max_zoom}).",
+                    SOURCE_CONFIG_ERROR_REGION_ZOOM_INVERTED,
                 )
             region_wgs84 = self._get_bounds_wgs84(region_extent)
             extent_wgs84 = self._get_bounds_wgs84(extent)
