@@ -43,10 +43,10 @@ from qgis.core import (QgsProcessingAlgorithm,
 
 from .comapeo_smp_generator import (
     SMPGenerator,
-    _ZOOM_LABEL_LOCAL_MIN,
-    _ZOOM_LABEL_REGION_MAX,
-    _ZOOM_LABEL_REGION_MIN,
-    _ZOOM_LABEL_WORLD_MAX,
+    SourceConfigError,
+    SOURCE_CONFIG_ERROR_REGION_LOCAL_OVERLAP,
+    SOURCE_CONFIG_ERROR_WORLD_LOCAL_OVERLAP,
+    SOURCE_CONFIG_ERROR_WORLD_REGION_OVERLAP,
 )
 
 
@@ -104,11 +104,13 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
             parameter.setHelp(self.tr(help_text))
         return parameter
 
-    def _source_configuration_error_message(self, message):
-        if (
-            _ZOOM_LABEL_REGION_MAX in message
-            and _ZOOM_LABEL_LOCAL_MIN in message
-        ):
+    def _source_configuration_error_message(self, message, code=None):
+        """Return ``message`` enriched with a localized hint based on ``code``.
+
+        Matching is done by stable error code rather than English substrings
+        so non-English translations of ``message`` still pick up the hint.
+        """
+        if code == SOURCE_CONFIG_ERROR_REGION_LOCAL_OVERLAP:
             return (
                 message + ' ' +
                 self.tr(
@@ -118,10 +120,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                     'lower Region maximum zoom before running.'
                 )
             )
-        if (
-            _ZOOM_LABEL_WORLD_MAX in message
-            and _ZOOM_LABEL_REGION_MIN in message
-        ):
+        if code == SOURCE_CONFIG_ERROR_WORLD_REGION_OVERLAP:
             return (
                 message + ' ' +
                 self.tr(
@@ -129,12 +128,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                     'Region maximum zoom < Local minimum zoom.'
                 )
             )
-        if (
-            _ZOOM_LABEL_WORLD_MAX in message
-            and _ZOOM_LABEL_LOCAL_MIN in message
-            and _ZOOM_LABEL_REGION_MIN not in message
-            and _ZOOM_LABEL_REGION_MAX not in message
-        ):
+        if code == SOURCE_CONFIG_ERROR_WORLD_LOCAL_OVERLAP:
             return (
                 message + ' ' +
                 self.tr(
@@ -402,6 +396,10 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                 min_zoom,
                 max_zoom,
                 **fixed_source_options
+            )
+        except SourceConfigError as exc:
+            return False, self._source_configuration_error_message(
+                self.tr(str(exc)), exc.code
             )
         except ValueError as exc:
             return False, self._source_configuration_error_message(self.tr(str(exc)))

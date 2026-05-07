@@ -131,6 +131,10 @@ sys.modules['qgis.PyQt.QtGui'] = pyqt_gui_mock
 # Now import the generator (QGIS not needed for pure-logic methods)
 from comapeo_smp_generator import (  # noqa: E402
     SMPGenerator,
+    SourceConfigError,
+    SOURCE_CONFIG_ERROR_REGION_LOCAL_OVERLAP,
+    SOURCE_CONFIG_ERROR_WORLD_LOCAL_OVERLAP,
+    SOURCE_CONFIG_ERROR_WORLD_REGION_OVERLAP,
     TileCache,
     TILE_COUNT_WARNING_THRESHOLD,
     BYTES_PER_TILE_PNG,
@@ -562,6 +566,42 @@ class TestFixedSourceValidation(unittest.TestCase):
         sig_a = SMPGenerator._source_plan_signature(plan_a)
         sig_b = SMPGenerator._source_plan_signature(plan_b)
         self.assertEqual(sig_a, sig_b)
+
+    def test_world_region_overlap_raises_coded_error(self):
+        """World/Region overlap must raise SourceConfigError with stable code."""
+        with self.assertRaises(SourceConfigError) as ctx:
+            self.gen._build_export_plan(
+                self.local_extent, 6, 7,
+                include_world_base_zooms=True,
+                world_max_zoom=4,
+                include_region=True,
+                region_extent=self.region_extent,
+                region_min_zoom=4,
+                region_max_zoom=5,
+            )
+        self.assertEqual(ctx.exception.code, SOURCE_CONFIG_ERROR_WORLD_REGION_OVERLAP)
+
+    def test_region_local_overlap_raises_coded_error(self):
+        """Region/Local overlap must raise SourceConfigError with stable code."""
+        with self.assertRaises(SourceConfigError) as ctx:
+            self.gen._build_export_plan(
+                self.local_extent, 6, 7,
+                include_region=True,
+                region_extent=self.region_extent,
+                region_min_zoom=4,
+                region_max_zoom=6,
+            )
+        self.assertEqual(ctx.exception.code, SOURCE_CONFIG_ERROR_REGION_LOCAL_OVERLAP)
+
+    def test_world_local_overlap_raises_coded_error(self):
+        """World/Local overlap (no region) must raise SourceConfigError with stable code."""
+        with self.assertRaises(SourceConfigError) as ctx:
+            self.gen._build_export_plan(
+                self.local_extent, 3, 7,
+                include_world_base_zooms=True,
+                world_max_zoom=3,
+            )
+        self.assertEqual(ctx.exception.code, SOURCE_CONFIG_ERROR_WORLD_LOCAL_OVERLAP)
 
 
     def test_new_default_params_succeed(self):

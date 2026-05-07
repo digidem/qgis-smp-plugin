@@ -39,6 +39,22 @@ _ZOOM_LABEL_WORLD_MAX = 'World maximum zoom'
 _ZOOM_LABEL_REGION_MIN = 'Region minimum zoom'
 _ZOOM_LABEL_REGION_MAX = 'Region maximum zoom'
 _ZOOM_LABEL_LOCAL_MIN = 'Local minimum zoom'
+
+# Stable codes for source-configuration errors. Downstream UI (Processing
+# algorithm) attaches localized hints by code so translated messages still
+# match the right hint regardless of language.
+SOURCE_CONFIG_ERROR_REGION_LOCAL_OVERLAP = 'region_local_zoom_overlap'
+SOURCE_CONFIG_ERROR_WORLD_REGION_OVERLAP = 'world_region_zoom_overlap'
+SOURCE_CONFIG_ERROR_WORLD_LOCAL_OVERLAP = 'world_local_zoom_overlap'
+
+
+class SourceConfigError(ValueError):
+    """ValueError carrying a stable code so downstream UI can attach localized
+    hints regardless of the message's language."""
+
+    def __init__(self, message, code):
+        super().__init__(message)
+        self.code = code
 # Estimated bytes per tile (PNG ~50 KB, JPG ~15 KB)
 BYTES_PER_TILE_PNG = 50 * 1024
 BYTES_PER_TILE_JPG = 15 * 1024
@@ -590,19 +606,22 @@ class SMPGenerator:
             if not self._extent_contains_bounds(region_wgs84, extent_wgs84):
                 raise ValueError('Local extent must be fully contained within the Region extent.')
             if include_world_base_zooms and world_max_zoom >= region_min_zoom:
-                raise ValueError(
+                raise SourceConfigError(
                     f"{_ZOOM_LABEL_WORLD_MAX} ({world_max_zoom}) must be less than "
-                    f"{_ZOOM_LABEL_REGION_MIN} ({region_min_zoom})."
+                    f"{_ZOOM_LABEL_REGION_MIN} ({region_min_zoom}).",
+                    SOURCE_CONFIG_ERROR_WORLD_REGION_OVERLAP,
                 )
             if region_max_zoom >= min_zoom:
-                raise ValueError(
+                raise SourceConfigError(
                     f"{_ZOOM_LABEL_REGION_MAX} ({region_max_zoom}) must be less than "
-                    f"{_ZOOM_LABEL_LOCAL_MIN} ({min_zoom})."
+                    f"{_ZOOM_LABEL_LOCAL_MIN} ({min_zoom}).",
+                    SOURCE_CONFIG_ERROR_REGION_LOCAL_OVERLAP,
                 )
         elif include_world_base_zooms and world_max_zoom >= min_zoom:
-            raise ValueError(
+            raise SourceConfigError(
                 f"{_ZOOM_LABEL_WORLD_MAX} ({world_max_zoom}) must be less than "
-                f"{_ZOOM_LABEL_LOCAL_MIN} ({min_zoom}) when Region is disabled."
+                f"{_ZOOM_LABEL_LOCAL_MIN} ({min_zoom}) when Region is disabled.",
+                SOURCE_CONFIG_ERROR_WORLD_LOCAL_OVERLAP,
             )
 
     @staticmethod
