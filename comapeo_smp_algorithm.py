@@ -492,33 +492,38 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
         feedback.pushInfo(
             self.tr('Using visible project layers in layer-tree order for rendering')
         )
-        feedback.pushInfo(self.tr(f'Extent: {extent.asWktPolygon()}'))
-        feedback.pushInfo(self.tr(f'Min zoom: {min_zoom}'))
-        feedback.pushInfo(self.tr(f'Max zoom: {max_zoom}'))
-        feedback.pushInfo(self.tr(f'Tile format: {tile_format}'))
-        feedback.pushInfo(self.tr(f'Include world source: {fixed_source_options["include_world_base_zooms"]}'))
-        feedback.pushInfo(self.tr(f'World max zoom: {fixed_source_options["world_max_zoom"]}'))
-        feedback.pushInfo(self.tr(f'Include region source: {fixed_source_options["include_region"]}'))
+        feedback.pushInfo(self.tr('Extent: {}').format(extent.asWktPolygon()))
+        feedback.pushInfo(self.tr('Min zoom: {}').format(min_zoom))
+        feedback.pushInfo(self.tr('Max zoom: {}').format(max_zoom))
+        feedback.pushInfo(self.tr('Tile format: {}').format(tile_format))
+        feedback.pushInfo(self.tr('Include world source: {}').format(
+            fixed_source_options['include_world_base_zooms']))
+        feedback.pushInfo(self.tr('World max zoom: {}').format(
+            fixed_source_options['world_max_zoom']))
+        feedback.pushInfo(self.tr('Include region source: {}').format(
+            fixed_source_options['include_region']))
         if fixed_source_options['include_region'] and fixed_source_options['region_extent'] is not None:
             feedback.pushInfo(
-                self.tr(f'Region extent: {fixed_source_options["region_extent"].asWktPolygon()}')
+                self.tr('Region extent: {}').format(
+                    fixed_source_options['region_extent'].asWktPolygon()
+                )
             )
             feedback.pushInfo(
-                self.tr(
-                    f'Region zoom range: '
-                    f'{fixed_source_options["region_min_zoom"]}-{fixed_source_options["region_max_zoom"]}'
+                self.tr('Region zoom range: {}-{}').format(
+                    fixed_source_options['region_min_zoom'],
+                    fixed_source_options['region_max_zoom'],
                 )
             )
         if tile_format in ('JPG', 'WEBP'):
-            feedback.pushInfo(self.tr(f'{tile_format} quality: {jpeg_quality}'))
-        feedback.pushInfo(self.tr(f'Output file: {output_file}'))
+            feedback.pushInfo(self.tr('{} quality: {}').format(tile_format, jpeg_quality))
+        feedback.pushInfo(self.tr('Output file: {}').format(output_file))
 
         estimated_tiles = export_plan['total_tiles']
         world_coverage_tiles = export_plan['world_coverage_tiles']
         estimated_bytes = generator.estimate_tile_storage_bytes(estimated_tiles, tile_format)
         estimated_mb = estimated_bytes / (1024 * 1024)
-        feedback.pushInfo(self.tr(f'Estimated tile count: {estimated_tiles:,}'))
-        feedback.pushInfo(self.tr(f'Estimated size: {estimated_mb:.1f} MB'))
+        feedback.pushInfo(self.tr('Estimated tile count: {:,}').format(estimated_tiles))
+        feedback.pushInfo(self.tr('Estimated size: {:.1f} MB').format(estimated_mb))
         feedback.pushInfo(
             self.tr(
                 'Estimated world pyramid coverage: {:.2f}% ({:,}/{:,} tiles)'.format(
