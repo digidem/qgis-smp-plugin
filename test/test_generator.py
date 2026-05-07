@@ -5238,6 +5238,83 @@ class TestSMPRoundtripMultiSource(unittest.TestCase):
         self.assertEqual(s1_count, region_plan['total_tiles'])
         self.assertEqual(s2_count, local_plan['total_tiles'])
 
+    def test_world_disabled_with_region_produces_sparse_indices(self):
+        """World disabled + Region enabled must yield sources at indices {1, 2} only.
+
+        Verifies the sparse fixed-slot contract end-to-end: plan, style, and
+        archive must reflect ``s/1`` and ``s/2`` while never producing ``s/0``.
+        """
+        gen = SMPGenerator()
+        gen._get_bounds_wgs84 = lambda ext: [
+            ext.xMinimum(), ext.yMinimum(), ext.xMaximum(), ext.yMaximum()
+        ]
+        gen.get_world_extent = lambda: _FakeRectangle(-180, -85.0511, 180, 85.0511)
+
+        local_extent = _FakeRectangle(-1, -1, 1, 1)
+        region_extent = _FakeRectangle(-2, -2, 2, 2)
+
+        plan = gen._build_export_plan(
+            local_extent, 7, 9,
+            include_world_base_zooms=False,
+            include_region=True,
+            region_extent=region_extent,
+            region_min_zoom=4,
+            region_max_zoom=6,
+        )
+
+        # Sparse indices: no slot 0, region=1, local=2.
+        self.assertEqual(
+            [s['source_index'] for s in plan['sources']], [1, 2]
+        )
+        self.assertEqual(
+            [s['source_id'] for s in plan['sources']],
+            ['region-detail', 'local-detail'],
+        )
+
+        # Style should map only s/1 and s/2; never s/0 when world is disabled.
+        style = gen._create_style_from_canvas(
+            local_extent, 7, 9, 'PNG',
+            source_plans=plan['sources'],
+        )
+        folders = style['metadata']['smp:sourceFolders']
+        self.assertEqual(folders.get('region-detail'), 's/1')
+        self.assertEqual(folders.get('local-detail'), 's/2')
+        self.assertNotIn('world-overview', folders)
+        for folder in folders.values():
+            self.assertNotEqual(folder, 's/0')
+
+        # Archive contents must mirror the sparse layout.
+        import json
+        import zipfile
+
+        style_path = os.path.join(self.tmp, 'style_sparse.json')
+        with open(style_path, 'w') as f:
+            json.dump(style, f)
+
+        tiles_dir = os.path.join(self.tmp, 'tiles_sparse')
+        for source_index, zoom, x, y in [(1, 4, 8, 8), (2, 7, 64, 64)]:
+            tile_dir = os.path.join(tiles_dir, str(source_index), str(zoom), str(x))
+            os.makedirs(tile_dir, exist_ok=True)
+            with open(os.path.join(tile_dir, f'{y}.png'), 'wb') as f:
+                f.write(b'\x89PNG\r\n\x1a\n')
+
+        out_path = os.path.join(self.tmp, 'sparse.smp')
+        gen._build_smp_archive(
+            style_path=style_path,
+            tiles_dir=tiles_dir,
+            output_path=out_path,
+        )
+
+        with zipfile.ZipFile(out_path) as zf:
+            names = set(zf.namelist())
+
+        s0_tiles = {n for n in names if n.startswith('s/0/')}
+        s1_tiles = {n for n in names if n.startswith('s/1/')}
+        s2_tiles = {n for n in names if n.startswith('s/2/')}
+        self.assertEqual(s0_tiles, set(), 'No s/0/ entries expected when World is disabled')
+        self.assertGreater(len(s1_tiles), 0, 'Region tiles missing under s/1/')
+        self.assertGreater(len(s2_tiles), 0, 'Local tiles missing under s/2/')
+
 
 class TestDedupWithOverlappingZooms(unittest.TestCase):
     """Dedup must not collapse cross-source tiles even when content is identical."""
