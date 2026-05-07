@@ -534,13 +534,10 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
             )
         )
         if export_plan['gap_zooms']:
-            feedback.reportError(
-                self.tr(
-                    'No raster coverage will be generated for zoom levels: {}'.format(
-                        ', '.join(str(zoom) for zoom in export_plan['gap_zooms'])
-                    )
-                ),
-                fatalError=False
+            feedback.pushWarning(
+                self.tr('No raster coverage will be generated for zoom levels: {}').format(
+                    ', '.join(str(zoom) for zoom in export_plan['gap_zooms'])
+                )
             )
 
         # Generate the SMP file
