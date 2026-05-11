@@ -1,5 +1,11 @@
 # Auto-Detection of Zoom-Dependent SMP Sources — Feasibility Research
 
+> **STATUS: RESEARCH — not yet implemented.**
+> This document describes a speculative feature (auto-detection of zoom-dependent
+> SMP sources from QGIS layer rendering settings). It is not part of the current
+> fixed-slot source model implemented in this plugin. See `XYZ_SMP.md` for the
+> currently supported source configuration.
+
 **Date:** 2026-04-12 (updated 2026-04-13)
 **Status:** Research Complete — testing plan pending
 **Testing plan:** [research-zoom-sources-testing.md](research-zoom-sources-testing.md)

@@ -8,20 +8,13 @@
             "minzoom": 0,
             "maxzoom": 16,
             "type": "raster",
-            "description": "XYZ tiles from Mapbox Custom Style",
-            "version": "1.0.0",
-            "attribution": "© Mapbox",
+            "version": "2.0",
             "scheme": "xyz",
             "bounds": [
                 -47.779541015625,
                 -8.787368246556245,
                 -47.098388671875,
                 -7.890588474156232
-            ],
-            "center": [
-                0,
-                0,
-                8
             ],
             "tiles": [
                 "smp://maps.v1/s/0/{z}/{x}/{y}.jpg"
