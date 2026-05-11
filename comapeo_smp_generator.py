@@ -365,9 +365,11 @@ class SMPGenerator:
                              include_world_base_zooms=False, world_max_zoom=3):
         """Return per-zoom extent according to world-base-zooms options.
 
-        Legacy helper retained for preview/debug paths (e.g. get_tile_grid_rects).
-        Does not reflect the fixed-slot world/region/local model — do not use on
-        the main export path; consume export_plan['tiles_by_zoom'] instead.
+        DEPRECATED: Do not use on the main export path.  This helper does not
+        reflect the fixed-slot world/region/local model introduced in the
+        multi-source refactor.  Use ``_build_export_plan`` instead and consume
+        ``export_plan['tiles_by_zoom']`` for per-zoom extent and tile ranges.
+        Retained for preview/debug paths (e.g. get_tile_grid_rects).
         """
         if include_world_base_zooms and zoom <= world_max_zoom:
             return world_extent
@@ -385,9 +387,11 @@ class SMPGenerator:
                             include_world_base_zooms=False, world_max_zoom=3):
         """Yield `(zoom, zoom_extent, ranges)` for the effective export plan.
 
-        Legacy helper retained for preview/debug paths (e.g. get_tile_grid_rects).
-        Does not reflect the fixed-slot world/region/local model — do not use on
-        the main export path; consume export_plan['tiles_by_zoom'] instead.
+        DEPRECATED: Do not use on the main export path.  This helper does not
+        reflect the fixed-slot world/region/local model introduced in the
+        multi-source refactor.  Use ``_build_export_plan`` instead and consume
+        ``export_plan['tiles_by_zoom']`` for per-zoom extent and tile ranges.
+        Retained for preview/debug paths (e.g. get_tile_grid_rects).
         """
         world_extent = self.get_world_extent() if include_world_base_zooms else None
         export_zooms = self._get_export_zooms(

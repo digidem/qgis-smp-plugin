@@ -56,6 +56,7 @@ from .comapeo_smp_generator import (
     SOURCE_CONFIG_ERROR_REGION_ZOOMS_REQUIRED,
     SOURCE_CONFIG_ERROR_REGION_CONTAINMENT,
     SOURCE_CONFIG_ERROR_CRS_TRANSFORM,
+    WORLD_MAX_ZOOM_WARNING_THRESHOLD,
 )
 
 
@@ -293,7 +294,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                 defaultValue=3,
                 optional=True,
                 minValue=0,
-                maxValue=24
+                maxValue=WORLD_MAX_ZOOM_WARNING_THRESHOLD + 2
             )
         )
 
@@ -412,7 +413,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
         include_region = self.parameterAsBool(parameters, self.INCLUDE_REGION, context)
         world_max_zoom = (
             self.parameterAsInt(parameters, self.WORLD_MAX_ZOOM, context)
-            if include_world_base_zooms else 3
+            if include_world_base_zooms else None
         )
         if world_max_zoom is None:
             world_max_zoom = 3
@@ -580,8 +581,9 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
         feedback.pushInfo(self.tr('Tile format: {}').format(tile_format))
         feedback.pushInfo(self.tr('Include world source: {}').format(
             fixed_source_options['include_world_base_zooms']))
-        feedback.pushInfo(self.tr('World max zoom: {}').format(
-            fixed_source_options['world_max_zoom']))
+        if fixed_source_options['include_world_base_zooms']:
+            feedback.pushInfo(self.tr('World max zoom: {}').format(
+                fixed_source_options['world_max_zoom']))
         feedback.pushInfo(self.tr('Include region source: {}').format(
             fixed_source_options['include_region']))
         if fixed_source_options['include_region'] and fixed_source_options['region_extent'] is not None:
