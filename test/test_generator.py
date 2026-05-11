@@ -674,6 +674,22 @@ class TestFixedSourceValidation(unittest.TestCase):
                 world_max_zoom=3,
             )
 
+    def test_crs_transform_failure_in_validation_raises_valueerror(self):
+        """CRS transform failure during region validation produces a clear ValueError."""
+        self.gen._get_bounds_wgs84 = MagicMock(side_effect=RuntimeError('CRS error'))
+
+        with self.assertRaisesRegex(
+            ValueError,
+            'Unable to transform extent to WGS84',
+        ):
+            self.gen._build_export_plan(
+                self.local_extent, 6, 7,
+                include_region=True,
+                region_extent=self.region_extent,
+                region_min_zoom=4,
+                region_max_zoom=5,
+            )
+
 
 class TestValidateDiskSpace(unittest.TestCase):
     """Test disk space validation."""
@@ -1652,6 +1668,12 @@ class TestLowZoomStyleOutput(unittest.TestCase):
                 'source_index': 1,
                 'source_bounds': [-10, -10, 10, 10],
                 'export_zooms': [3, 4, 5],
+            },
+            {
+                'source_id': 'local-detail',
+                'source_index': 2,
+                'source_bounds': [-1, -1, 1, 1],
+                'export_zooms': [6, 7],
             },
         ]
 

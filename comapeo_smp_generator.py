@@ -612,8 +612,14 @@ class SMPGenerator:
                     f"{_ZOOM_LABEL_REGION_MAX} ({region_max_zoom}).",
                     SOURCE_CONFIG_ERROR_REGION_ZOOM_INVERTED,
                 )
-            region_wgs84 = self._get_bounds_wgs84(region_extent)
-            extent_wgs84 = self._get_bounds_wgs84(extent)
+            try:
+                region_wgs84 = self._get_bounds_wgs84(region_extent)
+                extent_wgs84 = self._get_bounds_wgs84(extent)
+            except Exception as exc:
+                raise ValueError(
+                    'Unable to transform extent to WGS84. '
+                    'Check that your project CRS is valid and supported.'
+                ) from exc
             if not self._extent_contains_bounds(region_wgs84, extent_wgs84):
                 raise ValueError('Local extent must be fully contained within the Region extent.')
             if include_world_base_zooms and world_max_zoom >= region_min_zoom:
@@ -1260,14 +1266,10 @@ class SMPGenerator:
             None,
         )
         if local_plan is None:
-            # Defensive: callers should always include a local plan, but
-            # fall back to the last source rather than crashing.
-            self.log(
-                'Warning: no local-detail or mbtiles-source found in '
-                'source_plans; falling back to last source for bounds/center.',
-                Qgis.Warning
+            raise ValueError(
+                'No local source plan found in source_plans. '
+                'Expected a source with source_id "local-detail" or "mbtiles-source".'
             )
-            local_plan = source_plans[-1]
         local_bounds = local_plan['source_bounds']
         center_lon = (local_bounds[0] + local_bounds[2]) / 2
         center_lat = (local_bounds[1] + local_bounds[3]) / 2

@@ -260,6 +260,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                     minValue=0,
                     maxValue=24
                 ),
+                'Only used when Include Region detail source is enabled. '
                 'Must be greater than World maximum zoom when World is enabled.'
             )
         )
@@ -275,6 +276,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                     minValue=0,
                     maxValue=24
                 ),
+                'Only used when Include Region detail source is enabled. '
                 'Must be less than Local minimum zoom.'
             )
         )
