@@ -11,6 +11,7 @@ import shutil
 import zipfile
 import tempfile
 import time
+from types import MappingProxyType
 from typing import NamedTuple
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from qgis.core import (
@@ -86,12 +87,12 @@ FIXED_SOURCE_SLOTS = (
         'layer_id': 'local-raster',
     },
 )
-SOURCE_SLOT_BY_ID = {
+SOURCE_SLOT_BY_ID = MappingProxyType({
     slot['source_id']: slot for slot in FIXED_SOURCE_SLOTS
-}
-SOURCE_SLOT_BY_INDEX = {
+})
+SOURCE_SLOT_BY_INDEX = MappingProxyType({
     slot['source_index']: slot for slot in FIXED_SOURCE_SLOTS
-}
+})
 
 
 class LocalHeaderEntry(NamedTuple):
@@ -1147,6 +1148,10 @@ class SMPGenerator:
                 extent, min_zoom, max_zoom, tile_format,
                 include_world_base_zooms=include_world_base_zooms,
                 world_max_zoom=world_max_zoom,
+                include_region=include_region,
+                region_extent=region_extent,
+                region_min_zoom=region_min_zoom,
+                region_max_zoom=region_max_zoom,
                 source_plans=source_plans
             )
             style_path = os.path.join(temp_dir, "style.json")
@@ -1227,6 +1232,8 @@ class SMPGenerator:
     def _create_style_from_canvas(
             self, extent, min_zoom, max_zoom, tile_format=None,
             include_world_base_zooms=False, world_max_zoom=3,
+            include_region=False, region_extent=None,
+            region_min_zoom=None, region_max_zoom=None,
             source_plans=None):
         """
         Create a MapLibre style JSON from the current map canvas
@@ -1235,6 +1242,12 @@ class SMPGenerator:
         :param min_zoom: Minimum zoom level
         :param max_zoom: Maximum zoom level
         :param tile_format: Tile image format ('PNG' or 'JPG')
+        :param include_world_base_zooms: Whether to include world overview source
+        :param world_max_zoom: Maximum zoom for world overview tiles
+        :param include_region: Whether to include region detail source
+        :param region_extent: QgsRectangle extent for region source
+        :param region_min_zoom: Minimum zoom for region source
+        :param region_max_zoom: Maximum zoom for region source
         :param source_plans: Optional list of per-source plan dicts for fixed-slot multi-source
         :return: Style JSON object
         """
@@ -1249,7 +1262,11 @@ class SMPGenerator:
                 min_zoom,
                 max_zoom,
                 include_world_base_zooms=include_world_base_zooms,
-                world_max_zoom=world_max_zoom
+                world_max_zoom=world_max_zoom,
+                include_region=include_region,
+                region_extent=region_extent,
+                region_min_zoom=region_min_zoom,
+                region_max_zoom=region_max_zoom,
             )
             source_plans = export_plan.get('sources', [])
 
