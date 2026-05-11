@@ -45,6 +45,8 @@ from .comapeo_smp_generator import (
     SMPGenerator,
     SourceConfigError,
     SOURCE_CONFIG_ERROR_REGION_LOCAL_OVERLAP,
+    SOURCE_CONFIG_ERROR_REGION_ZOOM_INVERTED,
+    SOURCE_CONFIG_ERROR_REGION_ZOOM_OUT_OF_RANGE,
     SOURCE_CONFIG_ERROR_WORLD_LOCAL_OVERLAP,
     SOURCE_CONFIG_ERROR_WORLD_REGION_OVERLAP,
 )
@@ -126,6 +128,19 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                 self.tr(
                     'Region requires World maximum zoom < Region minimum zoom <= '
                     'Region maximum zoom < Local minimum zoom.'
+                )
+            )
+        if code == SOURCE_CONFIG_ERROR_REGION_ZOOM_OUT_OF_RANGE:
+            return (
+                message + ' ' +
+                self.tr('Region zoom values must be between 0 and 24.')
+            )
+        if code == SOURCE_CONFIG_ERROR_REGION_ZOOM_INVERTED:
+            return (
+                message + ' ' +
+                self.tr(
+                    'Region minimum zoom must not exceed Region maximum zoom. '
+                    'Swap the values.'
                 )
             )
         if code == SOURCE_CONFIG_ERROR_WORLD_LOCAL_OVERLAP:
