@@ -1757,7 +1757,7 @@ class SMPGenerator:
                         last_wait_log = now
                     continue
 
-                for future in done:
+                for future in sorted(done, key=lambda f: futures.get(f, (0, 0, 0, 0))[3]):
                     _done_tile = futures.pop(future, None)
                     future.result()
                     with progress_lock:
