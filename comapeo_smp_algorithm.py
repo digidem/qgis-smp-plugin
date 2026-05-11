@@ -124,10 +124,8 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
             return (
                 message + ' ' +
                 self.tr(
-                    'Region requires World maximum zoom < Region minimum zoom <= '
-                    'Region maximum zoom < Local minimum zoom. With the default '
-                    'Region zoom range (6-9), set Local minimum zoom to 10 or '
-                    'lower Region maximum zoom before running.'
+                    'Increase Local maximum zoom or lower Region maximum zoom '
+                    'so there is room to separate the two sources.'
                 )
             )
         if code == SOURCE_CONFIG_ERROR_WORLD_REGION_OVERLAP:
@@ -234,7 +232,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                 self.MIN_ZOOM,
                 self.tr('Minimum zoom level'),
                 QgsProcessingParameterNumber.Integer,
-                defaultValue=4,
+                defaultValue=8,
                 optional=False,
                 minValue=0,
                 maxValue=24
@@ -307,8 +305,9 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                     optional=False
                 ),
                 'Region requires World maximum zoom < Region minimum zoom <= '
-                'Region maximum zoom < Local minimum zoom. With default Region '
-                'zooms 6-9, set Local minimum zoom to 10 before enabling Region.'
+                'Region maximum zoom < Local minimum zoom. '
+                'Local minimum zoom will be automatically raised if it overlaps '
+                'with the Region range.'
             )
         )
 
@@ -330,7 +329,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                     self.REGION_MIN_ZOOM,
                     self.tr('Region minimum zoom level'),
                     QgsProcessingParameterNumber.Integer,
-                    defaultValue=6,
+                    defaultValue=4,
                     optional=True,
                     minValue=0,
                     maxValue=24
@@ -346,13 +345,14 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                     self.REGION_MAX_ZOOM,
                     self.tr('Region maximum zoom level'),
                     QgsProcessingParameterNumber.Integer,
-                    defaultValue=9,
+                    defaultValue=7,
                     optional=True,
                     minValue=0,
                     maxValue=24
                 ),
                 'Only used when Include Region detail source is enabled. '
-                'Must be less than Local minimum zoom.'
+                'Must be less than Local minimum zoom. '
+                'Local minimum zoom will be automatically raised if it overlaps.'
             )
         )
 

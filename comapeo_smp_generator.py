@@ -655,12 +655,6 @@ class SMPGenerator:
                     f"{_ZOOM_LABEL_REGION_MIN} ({region_min_zoom}).",
                     SOURCE_CONFIG_ERROR_WORLD_REGION_OVERLAP,
                 )
-            if region_max_zoom >= min_zoom:
-                raise SourceConfigError(
-                    f"{_ZOOM_LABEL_REGION_MAX} ({region_max_zoom}) must be less than "
-                    f"{_ZOOM_LABEL_LOCAL_MIN} ({min_zoom}).",
-                    SOURCE_CONFIG_ERROR_REGION_LOCAL_OVERLAP,
-                )
         elif include_world_base_zooms and world_max_zoom >= min_zoom:
             raise SourceConfigError(
                 f"{_ZOOM_LABEL_WORLD_MAX} ({world_max_zoom}) must be less than "
@@ -742,6 +736,52 @@ class SMPGenerator:
             region_max_zoom=region_max_zoom,
         )
 
+        # Auto-adjust Local minimum zoom for seamless source hand-off.
+        # - Gap fill: when Region is off and World < Local, pull Local
+        #   down to World+1 so there is no coverage gap.
+        # - Overlap raise: when Region is on and Local overlaps Region,
+        #   push Local up to Region+1 so sources don't conflict.
+        auto_adjust_warnings = []
+        if (
+            not include_region
+            and include_world_base_zooms
+            and world_max_zoom + 1 < min_zoom
+            and world_max_zoom + 1 <= max_zoom
+        ):
+            auto_adjust_warnings.append(
+                f"Local minimum zoom adjusted from {min_zoom} to "
+                f"{world_max_zoom + 1} to bridge gap with World maximum "
+                f"zoom ({world_max_zoom})."
+            )
+            min_zoom = world_max_zoom + 1
+        elif (
+            include_region
+            and region_max_zoom is not None
+            and region_max_zoom >= min_zoom
+            and region_max_zoom + 1 <= max_zoom
+        ):
+            auto_adjust_warnings.append(
+                f"Local minimum zoom adjusted from {min_zoom} to "
+                f"{region_max_zoom + 1} to avoid overlap with Region maximum "
+                f"zoom ({region_max_zoom})."
+            )
+            min_zoom = region_max_zoom + 1
+        elif (
+            include_region
+            and region_max_zoom is not None
+            and region_max_zoom >= min_zoom
+        ):
+            # Auto-raise is impossible because max_zoom is too low.
+            # Surface this as a hard error so the user can expand the
+            # Local zoom range or lower the Region boundary.
+            raise SourceConfigError(
+                f"{_ZOOM_LABEL_REGION_MAX} ({region_max_zoom}) must be less than "
+                f"{_ZOOM_LABEL_LOCAL_MIN} ({min_zoom}), but raising Local minimum "
+                f"zoom above {max_zoom} would leave no room for Local tiles. "
+                f"Increase Local maximum zoom or lower Region maximum zoom.",
+                SOURCE_CONFIG_ERROR_REGION_LOCAL_OVERLAP,
+            )
+
         sources = []
 
         if include_world_base_zooms:
@@ -802,7 +842,7 @@ class SMPGenerator:
 
         # Non-blocking advisory warnings surfaced to callers (Processing
         # algorithm forwards them via feedback.pushWarning).
-        warnings = []
+        warnings = auto_adjust_warnings
         if (
             include_world_base_zooms
             and world_max_zoom > WORLD_MAX_ZOOM_WARNING_THRESHOLD

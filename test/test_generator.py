@@ -325,12 +325,11 @@ class TestWorldBaseZooms(unittest.TestCase):
             include_world_base_zooms=True,
             world_max_zoom=3
         )
-        # World source covers full world at zooms 0-3 and Local covers the
-        # selected extent at zooms 5-7 using its fixed slot.
+        # Auto-fill lowers Local min_zoom from 5 to 4 to bridge the gap.
         expected = (
             self.gen.estimate_world_tile_count(0, 3)
             + self.gen.estimate_mixed_tile_count(
-                self.user_extent, 5, 7, include_world_base_zooms=False
+                self.user_extent, 4, 7, include_world_base_zooms=False
             )
         )
         self.assertEqual(mixed_count, expected)
@@ -366,10 +365,11 @@ class TestWorldBaseZooms(unittest.TestCase):
             include_world_base_zooms=True,
             world_max_zoom=3
         )
+        # Auto-fill lowers Local min_zoom from 6 to 4 to bridge the gap.
         expected = (
             self.gen.estimate_world_tile_count(0, 3)
             + self.gen.estimate_mixed_tile_count(
-                self.user_extent, 6, 7, include_world_base_zooms=False
+                self.user_extent, 4, 7, include_world_base_zooms=False
             )
         )
         self.assertEqual(mixed_count, expected)
@@ -474,25 +474,54 @@ class TestFixedSourceValidation(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.code, SOURCE_CONFIG_ERROR_WORLD_REGION_OVERLAP)
 
-    def test_region_local_zoom_overlap_is_rejected(self):
-        with self.assertRaises(SourceConfigError) as ctx:
-            self.gen._build_export_plan(
-                self.local_extent, 6, 7,
-                include_region=True,
-                region_extent=self.region_extent,
-                region_min_zoom=4,
-                region_max_zoom=6,
-            )
-        self.assertEqual(ctx.exception.code, SOURCE_CONFIG_ERROR_REGION_LOCAL_OVERLAP)
+    def test_region_local_zoom_overlap_is_auto_adjusted(self):
+        """Region/Local overlap auto-raises Local min_zoom to avoid conflict."""
+        plan = self.gen._build_export_plan(
+            self.local_extent, 6, 7,
+            include_region=True,
+            region_extent=self.region_extent,
+            region_min_zoom=4,
+            region_max_zoom=6,
+        )
+        # Local min_zoom auto-raised from 6 to 7 (region_max_zoom + 1)
+        local_plan = next(
+            src for src in plan['sources']
+            if src['source_id'] in ('local-detail', 'mbtiles-source')
+        )
+        export_zooms = set(
+            z for entry in local_plan['tiles_by_zoom'] for z in [entry[0]]
+        )
+        self.assertGreater(min(export_zooms), 6)
+        self.assertEqual(plan['gap_zooms'], [])
+        self.assertTrue(
+            any("Local minimum zoom adjusted" in w for w in plan['warnings'])
+        )
 
-    def test_gap_zooms_are_reported_when_world_and_local_skip_region(self):
+    def test_gap_zooms_are_bridged_when_world_and_local_skip_region(self):
+        """World→Local gap is auto-filled when Region is disabled."""
         plan = self.gen._build_export_plan(
             self.local_extent, 6, 7,
             include_world_base_zooms=True,
             world_max_zoom=3,
             include_region=False,
         )
-        self.assertEqual(plan['gap_zooms'], [4, 5])
+        # Local min_zoom auto-lowered from 6 to 4 (world_max + 1)
+        self.assertEqual(plan['gap_zooms'], [])
+        self.assertTrue(
+            any("Local minimum zoom adjusted" in w for w in plan['warnings'])
+        )
+
+    def test_region_local_overlap_still_raises_when_no_headroom_to_auto_raise(self):
+        """Region/Local overlap must raise when max_zoom is too low for auto-raise."""
+        with self.assertRaises(SourceConfigError) as ctx:
+            self.gen._build_export_plan(
+                self.local_extent, 9, 9,
+                include_region=True,
+                region_extent=self.region_extent,
+                region_min_zoom=4,
+                region_max_zoom=9,
+            )
+        self.assertEqual(ctx.exception.code, SOURCE_CONFIG_ERROR_REGION_LOCAL_OVERLAP)
 
     def test_region_containment_accepts_antimeridian_wrapped_extents(self):
         local_extent = _FakeRectangle(176, -1, -178, 1)
@@ -589,17 +618,27 @@ class TestFixedSourceValidation(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.code, SOURCE_CONFIG_ERROR_WORLD_REGION_OVERLAP)
 
-    def test_region_local_overlap_raises_coded_error(self):
-        """Region/Local overlap must raise SourceConfigError with stable code."""
-        with self.assertRaises(SourceConfigError) as ctx:
-            self.gen._build_export_plan(
-                self.local_extent, 6, 7,
-                include_region=True,
-                region_extent=self.region_extent,
-                region_min_zoom=4,
-                region_max_zoom=6,
-            )
-        self.assertEqual(ctx.exception.code, SOURCE_CONFIG_ERROR_REGION_LOCAL_OVERLAP)
+    def test_region_local_overlap_is_auto_adjusted(self):
+        """Region/Local overlap auto-raises Local min_zoom with warning."""
+        plan = self.gen._build_export_plan(
+            self.local_extent, 6, 7,
+            include_region=True,
+            region_extent=self.region_extent,
+            region_min_zoom=4,
+            region_max_zoom=6,
+        )
+        local_plan = next(
+            src for src in plan['sources']
+            if src['source_id'] in ('local-detail', 'mbtiles-source')
+        )
+        export_zooms = set(
+            z for entry in local_plan['tiles_by_zoom'] for z in [entry[0]]
+        )
+        # Local should start at 7 (region_max + 1), not at 6
+        self.assertGreater(min(export_zooms), 6)
+        self.assertTrue(
+            any("Local minimum zoom adjusted" in w for w in plan['warnings'])
+        )
 
     def test_world_local_overlap_raises_coded_error(self):
         """World/Local overlap (no region) must raise SourceConfigError with stable code."""
@@ -655,15 +694,20 @@ class TestFixedSourceValidation(unittest.TestCase):
 
 
     def test_new_default_params_succeed(self):
-        """New defaults (min_zoom=4, world enabled, world_max_zoom=3) must pass."""
+        """New defaults (min_zoom=8, world enabled, world_max_zoom=3) auto-fill gap."""
         plan = self.gen._build_export_plan(
-            self.local_extent, 4, 14,
+            self.local_extent, 8, 14,
             include_world_base_zooms=True,
             world_max_zoom=3,
         )
         source_ids = [src['source_id'] for src in plan['sources']]
         self.assertIn('world-overview', source_ids)
         self.assertIn('local-detail', source_ids)
+        # Gap zooms 4-7 are auto-filled by lowering Local min to 4
+        self.assertEqual(plan['gap_zooms'], [])
+        self.assertTrue(
+            any("Local minimum zoom adjusted" in w for w in plan['warnings'])
+        )
 
     def test_old_default_params_raise_source_config_error(self):
         """Old defaults (min_zoom=0, world enabled, world_max_zoom=3) must fail.
@@ -981,7 +1025,8 @@ class TestCreateStyleJson(unittest.TestCase):
         self.assertEqual(world_source['minzoom'], 0)
         self.assertEqual(world_source['maxzoom'], 3)
         self.assertEqual(world_source['bounds'], [-180.0, -85.0511, 180.0, 85.0511])
-        self.assertEqual(local_source['minzoom'], 6)
+        # Auto-fill lowers Local minzoom from 6 to 4 to bridge World→Local gap
+        self.assertEqual(local_source['minzoom'], 4)
         self.assertEqual(local_source['maxzoom'], 12)
         self.assertEqual(style['metadata']['smp:sourceFolders']['world-overview'], 's/0')
         self.assertEqual(style['metadata']['smp:sourceFolders']['local-detail'], 's/2')
@@ -1119,7 +1164,7 @@ class TestWorldBaseZoomGeneration(unittest.TestCase):
             finally:
                 shutil.rmtree(tmp, ignore_errors=True)
 
-        self.assertEqual(sorted(set(seen_zooms)), [0, 1, 2, 3, 6, 7])
+        self.assertEqual(sorted(set(seen_zooms)), [0, 1, 2, 3, 4, 5, 6, 7])
 
 class TestProgressSmoothing(unittest.TestCase):
     """Progress setProgress() should only be called when pct changes."""
@@ -1575,7 +1620,8 @@ class TestCacheDirectory(unittest.TestCase):
             shutil.rmtree(out_dir, ignore_errors=True)
 
     def test_generate_with_cache_dir_includes_world_low_zoom_tiles_in_manifest(self):
-        """Cache-backed exports must archive world tiles added below selected min zoom."""
+        """Cache-backed exports must archive world tiles added below selected min zoom.
+        Stale tiles outside the auto-adjusted range are excluded."""
         gen = SMPGenerator()
         gen.validate_tile_count = MagicMock(return_value=(6, None))
         gen.validate_extent_size = MagicMock(return_value=None)
@@ -1594,7 +1640,7 @@ class TestCacheDirectory(unittest.TestCase):
             world_tiles = [(0, 0, 0), (1, 0, 0), (2, 0, 0), (3, 0, 0)]
             # Local source tiles (source_index=2): zooms 6-7
             local_tiles = [(6, 0, 0), (7, 0, 0)]
-            stale_tiles = [(5, 0, 0)]
+            stale_tiles = [(8, 0, 0)]
 
             for zoom, x, y in world_tiles + local_tiles + stale_tiles:
                 src_idx = 0 if (zoom, x, y) in world_tiles else 2
@@ -1630,8 +1676,8 @@ class TestCacheDirectory(unittest.TestCase):
                 self.assertIn(f's/0/{zoom}/{x}/{y}.png', names)
             for zoom, x, y in local_tiles:
                 self.assertIn(f's/2/{zoom}/{x}/{y}.png', names)
-            self.assertNotIn('s/0/5/0/0.png', names)
-            self.assertNotIn('s/2/5/0/0.png', names)
+            self.assertNotIn('s/0/8/0/0.png', names)
+            self.assertNotIn('s/2/8/0/0.png', names)
             self.assertNotIn(f's/0/{TileCache.META_FILE}', names)
             self.assertNotIn(f's/2/{TileCache.META_FILE}', names)
         finally:
@@ -2418,7 +2464,7 @@ class TestCheckParameterValues(unittest.TestCase):
         )
         help_text = include_region_param.setHelp.call_args.args[0]
         self.assertIn('World maximum zoom < Region minimum zoom', help_text)
-        self.assertIn('set Local minimum zoom to 10', help_text)
+        self.assertIn('automatically raised', help_text)
 
     def test_world_max_zoom_parameter_is_optional(self):
         """World maximum zoom should not remain required when World is disabled."""
@@ -2569,13 +2615,13 @@ class TestCheckParameterValues(unittest.TestCase):
         generate_smp.assert_not_called()
 
     def test_new_default_params_pass_check_parameter_values(self):
-        """New defaults (min_zoom=4, world enabled, world_max_zoom=3) must pass checkParameterValues."""
+        """New defaults (min_zoom=8, world enabled, world_max_zoom=3) must pass checkParameterValues."""
         algo = self._make_algorithm()
         extent = self._make_extent(0, 0, 1, 1)
         algo.parameterAsExtent = MagicMock(return_value=extent)
         algo.parameterAsInt = MagicMock(
             side_effect=lambda p, k, c: (
-                4 if k == 'MIN_ZOOM' else (
+                8 if k == 'MIN_ZOOM' else (
                     3 if k == 'WORLD_MAX_ZOOM' else (
                         None if k in ('REGION_MIN_ZOOM', 'REGION_MAX_ZOOM') else 14
                     )
@@ -2601,8 +2647,8 @@ class TestCheckParameterValues(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(msg, '')
 
-    def test_region_enabled_defaults_report_actionable_zoom_guidance(self):
-        """Toggling Region on with current defaults should explain the needed zoom change."""
+    def test_overlapping_region_local_zooms_are_auto_adjusted(self):
+        """Region/Local zoom overlap is auto-raised, not rejected."""
         algo = self._make_algorithm()
         local_extent = self._make_extent(0, 0, 1, 1)
         region_extent = self._make_extent(-1, -1, 2, 2)
@@ -2626,18 +2672,23 @@ class TestCheckParameterValues(unittest.TestCase):
         algo.parameterAsExtent = MagicMock(side_effect=extent_value)
         algo.parameterAsInt = MagicMock(side_effect=lambda _p, key, _c: int_values[key])
         algo.parameterAsBool = MagicMock(side_effect=bool_value)
+        algo.parameterAsEnum = MagicMock(return_value=0)
+        algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
 
         import comapeo_smp_generator as _gen_mod
-        with patch.object(_gen_mod.SMPGenerator, '_get_bounds_wgs84',
+        with patch.object(_gen_mod.SMPGenerator, 'validate_disk_space'), \
+             patch.object(_gen_mod.SMPGenerator, 'get_world_extent',
+                          return_value=_FakeRectangle(-180, -85.0511, 180, 85.0511)), \
+             patch.object(_gen_mod.SMPGenerator, '_get_bounds_wgs84',
                           side_effect=lambda extent: [
                               extent.xMinimum(), extent.yMinimum(),
                               extent.xMaximum(), extent.yMaximum()
                           ]):
             ok, msg = algo.checkParameterValues({}, MagicMock())
 
-        self.assertFalse(ok)
-        self.assertIn('Region maximum zoom (9) must be less than Local minimum zoom (4)', msg)
-        self.assertIn('set Local minimum zoom to 10', msg)
+        # Auto-raise handles the overlap, so validation passes
+        self.assertTrue(ok)
+        self.assertEqual(msg, '')
 
     def test_world_local_overlap_without_region_reports_actionable_hint(self):
         """World enabled with Region disabled and overlapping zooms should suggest raising Local min."""
@@ -4466,7 +4517,8 @@ class TestMultiSourceExportPlan(unittest.TestCase):
             include_world_base_zooms=True, world_max_zoom=3
         )
         local_source = plan['sources'][1]
-        self.assertEqual(local_source['export_zooms'], list(range(5, 11)))
+        # Auto-fill lowers Local min_zoom from 5 to 4 to bridge World→Local gap
+        self.assertEqual(local_source['export_zooms'], list(range(4, 11)))
 
     def test_merged_tiles_by_zoom_preserves_order(self):
         """World source tiles come first, then Local source tiles."""
@@ -4587,19 +4639,20 @@ class TestMultiSourceExportPlan(unittest.TestCase):
         self.assertEqual([source['source_index'] for source in plan['sources']], [0, 1, 2])
 
     def test_world_coverage_gap_includes_local_only_tiles(self):
-        """A zoom gap should still count local-only high zoom tiles toward world coverage."""
+        """Local tiles at auto-filled gap zooms count toward world coverage."""
         plan = self.gen._build_export_plan(
             self.user_extent, 6, 7,
             include_world_base_zooms=True, world_max_zoom=3
         )
         unique_tiles = self._count_unique_tiles(plan)
 
-        self.assertEqual(plan['export_zooms'], [0, 1, 2, 3, 6, 7])
-        self.assertEqual(unique_tiles, 93)
+        # Auto-fill bridges World (0-3) and Local (6-7) by lowering Local to 4
+        self.assertEqual(plan['export_zooms'], [0, 1, 2, 3, 4, 5, 6, 7])
+        self.assertEqual(unique_tiles, 101)
         self.assertEqual(plan['world_coverage_tiles'], unique_tiles)
         self.assertEqual(plan['world_coverage_tiles'], plan['total_tiles'])
-        self.assertEqual(plan['world_tiles'], 20565)
-        self.assertAlmostEqual(plan['world_pct'], (93 / 20565) * 100, places=5)
+        self.assertEqual(plan['world_tiles'], 21845)
+        self.assertAlmostEqual(plan['world_pct'], (101 / 21845) * 100, places=5)
 
     def test_world_disabled_single_source_coverage_uses_total_tiles(self):
         """Local-only exports must keep world coverage equal to the export total."""
