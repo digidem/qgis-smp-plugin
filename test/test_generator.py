@@ -137,6 +137,13 @@ from comapeo_smp_generator import (  # noqa: E402
     SOURCE_CONFIG_ERROR_REGION_ZOOM_OUT_OF_RANGE,
     SOURCE_CONFIG_ERROR_WORLD_LOCAL_OVERLAP,
     SOURCE_CONFIG_ERROR_WORLD_REGION_OVERLAP,
+    SOURCE_CONFIG_ERROR_LOCAL_ZOOM_INVERTED,
+    SOURCE_CONFIG_ERROR_WORLD_MAX_ZOOM_NEGATIVE,
+    SOURCE_CONFIG_ERROR_WORLD_MAX_ZOOM_EXCEEDS_MAX,
+    SOURCE_CONFIG_ERROR_REGION_EXTENT_REQUIRED,
+    SOURCE_CONFIG_ERROR_REGION_ZOOMS_REQUIRED,
+    SOURCE_CONFIG_ERROR_REGION_CONTAINMENT,
+    SOURCE_CONFIG_ERROR_CRS_TRANSFORM,
     TileCache,
     TILE_COUNT_WARNING_THRESHOLD,
     BYTES_PER_TILE_PNG,
@@ -433,7 +440,7 @@ class TestFixedSourceValidation(unittest.TestCase):
         self.region_extent = _FakeRectangle(-2, -2, 2, 2)
 
     def test_region_requires_extent(self):
-        with self.assertRaisesRegex(ValueError, 'Region extent is required'):
+        with self.assertRaises(SourceConfigError) as ctx:
             self.gen._build_export_plan(
                 self.local_extent, 6, 7,
                 include_region=True,
@@ -441,9 +448,10 @@ class TestFixedSourceValidation(unittest.TestCase):
                 region_min_zoom=4,
                 region_max_zoom=5,
             )
+        self.assertEqual(ctx.exception.code, SOURCE_CONFIG_ERROR_REGION_EXTENT_REQUIRED)
 
     def test_region_requires_local_containment(self):
-        with self.assertRaisesRegex(ValueError, 'Local extent must be fully contained'):
+        with self.assertRaises(SourceConfigError) as ctx:
             self.gen._build_export_plan(
                 self.local_extent, 6, 7,
                 include_region=True,
@@ -451,12 +459,10 @@ class TestFixedSourceValidation(unittest.TestCase):
                 region_min_zoom=4,
                 region_max_zoom=5,
             )
+        self.assertEqual(ctx.exception.code, SOURCE_CONFIG_ERROR_REGION_CONTAINMENT)
 
     def test_world_region_zoom_overlap_is_rejected(self):
-        with self.assertRaisesRegex(
-            ValueError,
-            r'World maximum zoom \(4\) must be less than Region minimum zoom \(4\)',
-        ):
+        with self.assertRaises(SourceConfigError) as ctx:
             self.gen._build_export_plan(
                 self.local_extent, 6, 7,
                 include_world_base_zooms=True,
@@ -466,12 +472,10 @@ class TestFixedSourceValidation(unittest.TestCase):
                 region_min_zoom=4,
                 region_max_zoom=5,
             )
+        self.assertEqual(ctx.exception.code, SOURCE_CONFIG_ERROR_WORLD_REGION_OVERLAP)
 
     def test_region_local_zoom_overlap_is_rejected(self):
-        with self.assertRaisesRegex(
-            ValueError,
-            r'Region maximum zoom \(6\) must be less than Local minimum zoom \(6\)',
-        ):
+        with self.assertRaises(SourceConfigError) as ctx:
             self.gen._build_export_plan(
                 self.local_extent, 6, 7,
                 include_region=True,
@@ -479,6 +483,7 @@ class TestFixedSourceValidation(unittest.TestCase):
                 region_min_zoom=4,
                 region_max_zoom=6,
             )
+        self.assertEqual(ctx.exception.code, SOURCE_CONFIG_ERROR_REGION_LOCAL_OVERLAP)
 
     def test_gap_zooms_are_reported_when_world_and_local_skip_region(self):
         plan = self.gen._build_export_plan(
@@ -525,13 +530,14 @@ class TestFixedSourceValidation(unittest.TestCase):
         self.assertEqual([src['source_id'] for src in plan['sources']], ['region-detail', 'local-detail'])
 
     def test_world_max_zoom_exceeds_24_raises(self):
-        """world_max_zoom > 24 should raise ValueError when world base zooms enabled."""
-        with self.assertRaisesRegex(ValueError, 'must not exceed 24'):
+        """world_max_zoom > 24 should raise SourceConfigError when world base zooms enabled."""
+        with self.assertRaises(SourceConfigError) as ctx:
             self.gen._build_export_plan(
                 self.local_extent, 26, 28,
                 include_world_base_zooms=True,
                 world_max_zoom=25,
             )
+        self.assertEqual(ctx.exception.code, SOURCE_CONFIG_ERROR_WORLD_MAX_ZOOM_EXCEEDS_MAX)
 
     def test_source_plan_signature_differs_for_same_first_last_zooms(self):
         """Different zoom sets sharing the same first/last must produce different signatures."""
@@ -659,7 +665,7 @@ class TestFixedSourceValidation(unittest.TestCase):
         self.assertIn('world-overview', source_ids)
         self.assertIn('local-detail', source_ids)
 
-    def test_old_default_params_raise_valueerror(self):
+    def test_old_default_params_raise_source_config_error(self):
         """Old defaults (min_zoom=0, world enabled, world_max_zoom=3) must fail.
 
         Documents the intentional breaking change from the fixed-slot model:
@@ -667,21 +673,19 @@ class TestFixedSourceValidation(unittest.TestCase):
         world_max_zoom (3) >= min_zoom (0) when world is enabled and
         region is disabled.
         """
-        with self.assertRaisesRegex(ValueError, r'must be less than.*Local minimum zoom'):
+        with self.assertRaises(SourceConfigError) as ctx:
             self.gen._build_export_plan(
                 self.local_extent, 0, 14,
                 include_world_base_zooms=True,
                 world_max_zoom=3,
             )
+        self.assertEqual(ctx.exception.code, SOURCE_CONFIG_ERROR_WORLD_LOCAL_OVERLAP)
 
-    def test_crs_transform_failure_in_validation_raises_valueerror(self):
-        """CRS transform failure during region validation produces a clear ValueError."""
+    def test_crs_transform_failure_in_validation_raises_source_config_error(self):
+        """CRS transform failure during region validation produces a SourceConfigError."""
         self.gen._get_bounds_wgs84 = MagicMock(side_effect=RuntimeError('CRS error'))
 
-        with self.assertRaisesRegex(
-            ValueError,
-            'Unable to transform extent to WGS84',
-        ):
+        with self.assertRaises(SourceConfigError) as ctx:
             self.gen._build_export_plan(
                 self.local_extent, 6, 7,
                 include_region=True,
@@ -689,6 +693,7 @@ class TestFixedSourceValidation(unittest.TestCase):
                 region_min_zoom=4,
                 region_max_zoom=5,
             )
+        self.assertEqual(ctx.exception.code, SOURCE_CONFIG_ERROR_CRS_TRANSFORM)
 
 
 class TestValidateDiskSpace(unittest.TestCase):

@@ -49,6 +49,13 @@ SOURCE_CONFIG_ERROR_WORLD_REGION_OVERLAP = 'world_region_zoom_overlap'
 SOURCE_CONFIG_ERROR_WORLD_LOCAL_OVERLAP = 'world_local_zoom_overlap'
 SOURCE_CONFIG_ERROR_REGION_ZOOM_OUT_OF_RANGE = 'region_zoom_out_of_range'
 SOURCE_CONFIG_ERROR_REGION_ZOOM_INVERTED = 'region_zoom_inverted'
+SOURCE_CONFIG_ERROR_LOCAL_ZOOM_INVERTED = 'local_zoom_inverted'
+SOURCE_CONFIG_ERROR_WORLD_MAX_ZOOM_NEGATIVE = 'world_max_zoom_negative'
+SOURCE_CONFIG_ERROR_WORLD_MAX_ZOOM_EXCEEDS_MAX = 'world_max_zoom_exceeds_max'
+SOURCE_CONFIG_ERROR_REGION_EXTENT_REQUIRED = 'region_extent_required'
+SOURCE_CONFIG_ERROR_REGION_ZOOMS_REQUIRED = 'region_zooms_required'
+SOURCE_CONFIG_ERROR_REGION_CONTAINMENT = 'region_containment'
+SOURCE_CONFIG_ERROR_CRS_TRANSFORM = 'crs_transform'
 
 
 class SourceConfigError(ValueError):
@@ -583,22 +590,33 @@ class SMPGenerator:
                                              region_min_zoom=None,
                                              region_max_zoom=None):
         if min_zoom > max_zoom:
-            raise ValueError(
-                f"Local minimum zoom ({min_zoom}) must not exceed local maximum zoom ({max_zoom})."
+            raise SourceConfigError(
+                f"Local minimum zoom ({min_zoom}) must not exceed local maximum zoom ({max_zoom}).",
+                SOURCE_CONFIG_ERROR_LOCAL_ZOOM_INVERTED,
             )
 
         if include_world_base_zooms and world_max_zoom < 0:
-            raise ValueError('World maximum zoom must be greater than or equal to 0.')
+            raise SourceConfigError(
+                'World maximum zoom must be greater than or equal to 0.',
+                SOURCE_CONFIG_ERROR_WORLD_MAX_ZOOM_NEGATIVE,
+            )
 
         if include_world_base_zooms and world_max_zoom > 24:
-            raise ValueError('World maximum zoom must not exceed 24.')
+            raise SourceConfigError(
+                'World maximum zoom must not exceed 24.',
+                SOURCE_CONFIG_ERROR_WORLD_MAX_ZOOM_EXCEEDS_MAX,
+            )
 
         if include_region:
             if region_extent is None:
-                raise ValueError('Region extent is required when INCLUDE_REGION is enabled.')
+                raise SourceConfigError(
+                    'Region extent is required when INCLUDE_REGION is enabled.',
+                    SOURCE_CONFIG_ERROR_REGION_EXTENT_REQUIRED,
+                )
             if region_min_zoom is None or region_max_zoom is None:
-                raise ValueError(
-                    'Region min/max zoom values are required when INCLUDE_REGION is enabled.'
+                raise SourceConfigError(
+                    'Region min/max zoom values are required when INCLUDE_REGION is enabled.',
+                    SOURCE_CONFIG_ERROR_REGION_ZOOMS_REQUIRED,
                 )
             for label, value in ((_ZOOM_LABEL_REGION_MIN, region_min_zoom),
                                  (_ZOOM_LABEL_REGION_MAX, region_max_zoom)):
@@ -617,12 +635,16 @@ class SMPGenerator:
                 region_wgs84 = self._get_bounds_wgs84(region_extent)
                 extent_wgs84 = self._get_bounds_wgs84(extent)
             except Exception as exc:
-                raise ValueError(
+                raise SourceConfigError(
                     'Unable to transform extent to WGS84. '
-                    'Check that your project CRS is valid and supported.'
+                    'Check that your project CRS is valid and supported.',
+                    SOURCE_CONFIG_ERROR_CRS_TRANSFORM,
                 ) from exc
             if not self._extent_contains_bounds(region_wgs84, extent_wgs84):
-                raise ValueError('Local extent must be fully contained within the Region extent.')
+                raise SourceConfigError(
+                    'Local extent must be fully contained within the Region extent.',
+                    SOURCE_CONFIG_ERROR_REGION_CONTAINMENT,
+                )
             if include_world_base_zooms and world_max_zoom >= region_min_zoom:
                 raise SourceConfigError(
                     f"{_ZOOM_LABEL_WORLD_MAX} ({world_max_zoom}) must be less than "

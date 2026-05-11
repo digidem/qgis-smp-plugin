@@ -49,6 +49,13 @@ from .comapeo_smp_generator import (
     SOURCE_CONFIG_ERROR_REGION_ZOOM_OUT_OF_RANGE,
     SOURCE_CONFIG_ERROR_WORLD_LOCAL_OVERLAP,
     SOURCE_CONFIG_ERROR_WORLD_REGION_OVERLAP,
+    SOURCE_CONFIG_ERROR_LOCAL_ZOOM_INVERTED,
+    SOURCE_CONFIG_ERROR_WORLD_MAX_ZOOM_NEGATIVE,
+    SOURCE_CONFIG_ERROR_WORLD_MAX_ZOOM_EXCEEDS_MAX,
+    SOURCE_CONFIG_ERROR_REGION_EXTENT_REQUIRED,
+    SOURCE_CONFIG_ERROR_REGION_ZOOMS_REQUIRED,
+    SOURCE_CONFIG_ERROR_REGION_CONTAINMENT,
+    SOURCE_CONFIG_ERROR_CRS_TRANSFORM,
 )
 
 
@@ -149,6 +156,58 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                 self.tr(
                     'Raise Local minimum zoom above World maximum zoom, or '
                     'disable World coverage.'
+                )
+            )
+        if code == SOURCE_CONFIG_ERROR_LOCAL_ZOOM_INVERTED:
+            return (
+                message + ' ' +
+                self.tr(
+                    'Swap the Minimum and Maximum zoom level values so that '
+                    'Minimum does not exceed Maximum.'
+                )
+            )
+        if code == SOURCE_CONFIG_ERROR_WORLD_MAX_ZOOM_NEGATIVE:
+            return (
+                message + ' ' +
+                self.tr('Set World maximum zoom to 0 or higher.')
+            )
+        if code == SOURCE_CONFIG_ERROR_WORLD_MAX_ZOOM_EXCEEDS_MAX:
+            return (
+                message + ' ' +
+                self.tr(
+                    'Lower the World maximum zoom value to 24 or below.'
+                )
+            )
+        if code == SOURCE_CONFIG_ERROR_REGION_EXTENT_REQUIRED:
+            return (
+                message + ' ' +
+                self.tr(
+                    'Draw or select a Region extent before enabling the '
+                    'Region detail source.'
+                )
+            )
+        if code == SOURCE_CONFIG_ERROR_REGION_ZOOMS_REQUIRED:
+            return (
+                message + ' ' +
+                self.tr(
+                    'Set both Region minimum and maximum zoom levels before '
+                    'enabling the Region detail source.'
+                )
+            )
+        if code == SOURCE_CONFIG_ERROR_REGION_CONTAINMENT:
+            return (
+                message + ' ' +
+                self.tr(
+                    'Enlarge the Region extent so it fully covers the Local '
+                    'extent, or move the Local extent inside the Region.'
+                )
+            )
+        if code == SOURCE_CONFIG_ERROR_CRS_TRANSFORM:
+            return (
+                message + ' ' +
+                self.tr(
+                    'Verify that the project Coordinate Reference System is '
+                    'valid and supported by QGIS.'
                 )
             )
         return message
@@ -499,6 +558,12 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                 min_zoom,
                 max_zoom,
                 **fixed_source_options
+            )
+        except SourceConfigError as exc:
+            raise QgsProcessingException(
+                self._source_configuration_error_message(
+                    self.tr(str(exc)), exc.code
+                )
             )
         except ValueError as exc:
             raise QgsProcessingException(self.tr(str(exc)))
