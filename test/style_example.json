@@ -1,6 +1,7 @@
 {
     "version": 8,
     "name": "QGIS MAP",
+    "comment": "Legacy single-source example (pre-fixed-slot). Current multi-source model uses world-overview (s/0), region-detail (s/1), local-detail (s/2).",
     "sources": {
         "mbtiles-source": {
             "name": "QGIS Map",

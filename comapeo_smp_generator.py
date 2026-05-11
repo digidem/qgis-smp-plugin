@@ -749,7 +749,7 @@ class SMPGenerator:
                 self.get_world_extent(),
                 list(range(0, world_max_zoom + 1)),
                 source_id="world-overview",
-                source_index=0,
+                source_index=SOURCE_SLOT_BY_ID['world-overview']['source_index'],
             )
             sources.append(world_plan)
 
@@ -767,7 +767,7 @@ class SMPGenerator:
                 region_extent,
                 list(range(region_min_zoom, region_max_zoom + 1)),
                 source_id="region-detail",
-                source_index=1,
+                source_index=SOURCE_SLOT_BY_ID['region-detail']['source_index'],
             )
             sources.append(region_plan)
 
@@ -786,7 +786,7 @@ class SMPGenerator:
                 extent,
                 list(range(min_zoom, max_zoom + 1)),
                 source_id="local-detail",
-                source_index=2,
+                source_index=SOURCE_SLOT_BY_ID['local-detail']['source_index'],
             )
         sources.append(local_plan)
 
