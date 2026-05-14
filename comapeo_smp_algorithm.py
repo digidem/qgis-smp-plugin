@@ -686,5 +686,10 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
     def tr(self, string):
         return QCoreApplication.translate('Processing', string)
 
+    def createCustomParametersWidget(self, parent):
+        """Return a custom dialog with conditional parameter visibility."""
+        from .comapeo_smp_dialog import SmpAlgorithmDialog
+        return SmpAlgorithmDialog(self, parent=parent)
+
     def createInstance(self):
         return ComapeoMapBuilderAlgorithm()
