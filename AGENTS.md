@@ -114,11 +114,16 @@ builds the plugin zip via `git archive`, and attaches it to the release.
 - QGIS-runtime tests: `test/test_qgis_environment.py` and related integration tests.
 - Packaging and automation: `Makefile`, `metadata.txt`, `.github/workflows/release.yml`.
 
+## QGIS MCP Testing
+
+Use the `qgis-mcp-test` skill to verify plugin behavior in a live QGIS instance. Required for any change touching the Processing dialog, parameter wrappers, widget visibility, or plugin loading. Offline tests (`make test`) cover generator logic; MCP covers the QGIS runtime path.
+
 ## PR Checklist
 
 - Changed code is scoped to the request and avoids unrelated refactors.
 - Relevant tests were added/updated for behavioral changes.
 - `make flake8` passes (this is the CI gate; `make pylint`/`make pep8` are advisory).
+- QGIS MCP verification for dialog/UI changes (use `qgis-mcp-test` skill).
 - At least one verification command was executed and results were reported.
 - Documentation updated if parameters, output format, or workflow changed.
 - Version/changelog updates in `metadata.txt` only when release work is requested.
