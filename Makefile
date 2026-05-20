@@ -47,7 +47,9 @@ PY_FILES = \
 	comapeo_smp.py \
 	comapeo_smp_provider.py \
 	comapeo_smp_algorithm.py \
+	comapeo_smp_merge_algorithm.py \
 	comapeo_smp_generator.py \
+	comapeo_smp_merger.py \
 	comapeo_smp_dialog.py
 
 UI_FILES = 
@@ -99,6 +101,7 @@ test-logic:
 	@echo "QGIS-free logic tests (reliable)"
 	@echo "----------------------------------------"
 	PYTHONPATH=. python3 test/test_generator.py -v
+	PYTHONPATH=. python3 test/test_generator_merge.py -v
 	@echo "----------------------------------------"
 
 # Legacy full test suite — requires QGIS Python env + nosetests installed.
