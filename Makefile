@@ -47,7 +47,8 @@ PY_FILES = \
 	comapeo_smp.py \
 	comapeo_smp_provider.py \
 	comapeo_smp_algorithm.py \
-	comapeo_smp_generator.py
+	comapeo_smp_generator.py \
+	comapeo_smp_dialog.py
 
 UI_FILES = 
 

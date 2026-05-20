@@ -40,6 +40,9 @@ class _FakeRectangle:
                 f"{self._xmax} {self._ymax}, {self._xmin} {self._ymax}, "
                 f"{self._xmin} {self._ymin}))")
 
+    def isEmpty(self):
+        return self._xmax <= self._xmin or self._ymax <= self._ymin
+
 
 class _FakeCrs:
     pass
@@ -128,6 +131,19 @@ sys.modules['qgis.PyQt.QtGui'] = pyqt_gui_mock
 # Now import the generator (QGIS not needed for pure-logic methods)
 from comapeo_smp_generator import (  # noqa: E402
     SMPGenerator,
+    SourceConfigError,
+    SOURCE_CONFIG_ERROR_REGION_LOCAL_OVERLAP,
+    SOURCE_CONFIG_ERROR_REGION_ZOOM_INVERTED,
+    SOURCE_CONFIG_ERROR_REGION_ZOOM_OUT_OF_RANGE,
+    SOURCE_CONFIG_ERROR_WORLD_LOCAL_OVERLAP,
+    SOURCE_CONFIG_ERROR_WORLD_REGION_OVERLAP,
+    SOURCE_CONFIG_ERROR_LOCAL_ZOOM_INVERTED,
+    SOURCE_CONFIG_ERROR_WORLD_MAX_ZOOM_NEGATIVE,
+    SOURCE_CONFIG_ERROR_WORLD_MAX_ZOOM_EXCEEDS_MAX,
+    SOURCE_CONFIG_ERROR_REGION_EXTENT_REQUIRED,
+    SOURCE_CONFIG_ERROR_REGION_ZOOMS_REQUIRED,
+    SOURCE_CONFIG_ERROR_REGION_CONTAINMENT,
+    SOURCE_CONFIG_ERROR_CRS_TRANSFORM,
     TileCache,
     TILE_COUNT_WARNING_THRESHOLD,
     BYTES_PER_TILE_PNG,
@@ -281,9 +297,9 @@ class TestWorldBaseZooms(unittest.TestCase):
         self.assertEqual(self.gen.estimate_world_tile_count(0, 2), 21)
         self.assertEqual(self.gen.estimate_world_tile_count(0, 5), 1365)
 
-    def test_mixed_export_between_extent_only_and_full_world(self):
-        min_zoom = 0
-        max_zoom = 5
+    def test_mixed_export_between_local_only_and_world_plus_local(self):
+        min_zoom = 5
+        max_zoom = 7
         extent_only_count = self.gen.estimate_mixed_tile_count(
             self.user_extent, min_zoom, max_zoom, include_world_base_zooms=False
         )
@@ -294,14 +310,14 @@ class TestWorldBaseZooms(unittest.TestCase):
             include_world_base_zooms=True,
             world_max_zoom=4
         )
-        world_count = self.gen.estimate_world_tile_count(min_zoom, max_zoom)
+        world_count = self.gen.estimate_world_tile_count(0, 4)
 
         self.assertGreater(mixed_count, extent_only_count)
-        self.assertLessEqual(mixed_count, world_count)
+        self.assertEqual(mixed_count, extent_only_count + world_count)
 
     def test_enabled_world_coverage_applies_through_world_max_zoom(self):
-        min_zoom = 0
-        max_zoom = 5
+        min_zoom = 5
+        max_zoom = 7
         mixed_count = self.gen.estimate_mixed_tile_count(
             self.user_extent,
             min_zoom,
@@ -309,12 +325,11 @@ class TestWorldBaseZooms(unittest.TestCase):
             include_world_base_zooms=True,
             world_max_zoom=3
         )
-        # World source covers full world at zooms 0-3
-        # Region source covers user extent at zooms 0-5
+        # Auto-fill lowers Local min_zoom from 5 to 4 to bridge the gap.
         expected = (
             self.gen.estimate_world_tile_count(0, 3)
             + self.gen.estimate_mixed_tile_count(
-                self.user_extent, 0, 5, include_world_base_zooms=False
+                self.user_extent, 4, 7, include_world_base_zooms=False
             )
         )
         self.assertEqual(mixed_count, expected)
@@ -334,10 +349,10 @@ class TestWorldBaseZooms(unittest.TestCase):
     def test_world_max_zoom_values_for_enabled_mode(self):
         extent = self.user_extent
         count_three, _ = self.gen.validate_tile_count(
-            extent, 0, 5, include_world_base_zooms=True, world_max_zoom=3
+            extent, 6, 7, include_world_base_zooms=True, world_max_zoom=3
         )
         count_five, _ = self.gen.validate_tile_count(
-            extent, 0, 5, include_world_base_zooms=True, world_max_zoom=5
+            extent, 6, 7, include_world_base_zooms=True, world_max_zoom=5
         )
         self.assertGreaterEqual(count_five, count_three)
 
@@ -350,24 +365,40 @@ class TestWorldBaseZooms(unittest.TestCase):
             include_world_base_zooms=True,
             world_max_zoom=3
         )
+        # Auto-fill lowers Local min_zoom from 6 to 4 to bridge the gap.
         expected = (
             self.gen.estimate_world_tile_count(0, 3)
             + self.gen.estimate_mixed_tile_count(
-                self.user_extent, 6, 7, include_world_base_zooms=False
+                self.user_extent, 4, 7, include_world_base_zooms=False
             )
         )
         self.assertEqual(mixed_count, expected)
 
-    def test_world_zoom_selection_helper_enforces_world_0_to_2(self):
+    def test_world_zoom_selection_helper_respects_world_max_zoom(self):
         custom_world = _FakeRectangle(-180, -85, 180, 85)
+        chosen_at_zoom1 = self.gen._get_extent_for_zoom(
+            self.user_extent, custom_world, 1, include_world_base_zooms=True, world_max_zoom=1
+        )
         chosen_at_zoom2 = self.gen._get_extent_for_zoom(
-            self.user_extent, custom_world, 2, include_world_base_zooms=True, world_max_zoom=3
+            self.user_extent, custom_world, 2, include_world_base_zooms=True, world_max_zoom=1
         )
-        chosen_at_zoom4 = self.gen._get_extent_for_zoom(
-            self.user_extent, custom_world, 4, include_world_base_zooms=True, world_max_zoom=3
+        self.assertIs(chosen_at_zoom1, custom_world)
+        self.assertIs(chosen_at_zoom2, self.user_extent)
+
+    def test_export_zoom_helper_respects_world_max_zoom_below_two(self):
+        export_zooms = self.gen._get_export_zooms(
+            6, 7, include_world_base_zooms=True, world_max_zoom=1
         )
-        self.assertIs(chosen_at_zoom2, custom_world)
-        self.assertIs(chosen_at_zoom4, self.user_extent)
+        self.assertEqual(export_zooms, [0, 1, 6, 7])
+
+    def test_export_range_helper_respects_world_max_zoom_below_two(self):
+        ranges = list(self.gen._iter_export_ranges(
+            self.user_extent, 6, 7, include_world_base_zooms=True, world_max_zoom=1
+        ))
+        self.assertEqual([zoom for zoom, _, _ in ranges], [0, 1, 6, 7])
+        self.assertIs(ranges[0][1], self.world_extent)
+        self.assertIs(ranges[1][1], self.world_extent)
+        self.assertIs(ranges[2][1], self.user_extent)
 
 class TestValidateTileCount(unittest.TestCase):
     """Test validate_tile_count raises/warns correctly."""
@@ -395,6 +426,319 @@ class TestValidateTileCount(unittest.TestCase):
         count, warning = self.gen.validate_tile_count(extent, 0, 10)
         self.assertIsNotNone(warning)
         self.assertIn('Warning', warning)
+
+class TestFixedSourceValidation(unittest.TestCase):
+    """Validation rules for the fixed world/region/local source model."""
+
+    def setUp(self):
+        self.gen = SMPGenerator()
+        self.gen._get_bounds_wgs84 = lambda ext: [
+            ext.xMinimum(), ext.yMinimum(), ext.xMaximum(), ext.yMaximum()
+        ]
+        self.gen.get_world_extent = lambda: _FakeRectangle(-180, -85.0511, 180, 85.0511)
+        self.local_extent = _FakeRectangle(-1, -1, 1, 1)
+        self.region_extent = _FakeRectangle(-2, -2, 2, 2)
+
+    def test_region_requires_extent(self):
+        with self.assertRaises(SourceConfigError) as ctx:
+            self.gen._build_export_plan(
+                self.local_extent, 6, 7,
+                include_region=True,
+                region_extent=None,
+                region_min_zoom=4,
+                region_max_zoom=5,
+            )
+        self.assertEqual(ctx.exception.code, SOURCE_CONFIG_ERROR_REGION_EXTENT_REQUIRED)
+
+    def test_region_requires_local_containment(self):
+        with self.assertRaises(SourceConfigError) as ctx:
+            self.gen._build_export_plan(
+                self.local_extent, 6, 7,
+                include_region=True,
+                region_extent=_FakeRectangle(-0.5, -0.5, 0.5, 0.5),
+                region_min_zoom=4,
+                region_max_zoom=5,
+            )
+        self.assertEqual(ctx.exception.code, SOURCE_CONFIG_ERROR_REGION_CONTAINMENT)
+
+    def test_world_region_zoom_overlap_is_rejected(self):
+        with self.assertRaises(SourceConfigError) as ctx:
+            self.gen._build_export_plan(
+                self.local_extent, 6, 7,
+                include_world_base_zooms=True,
+                world_max_zoom=4,
+                include_region=True,
+                region_extent=self.region_extent,
+                region_min_zoom=4,
+                region_max_zoom=5,
+            )
+        self.assertEqual(ctx.exception.code, SOURCE_CONFIG_ERROR_WORLD_REGION_OVERLAP)
+
+    def test_region_local_zoom_overlap_is_auto_adjusted(self):
+        """Region/Local overlap auto-raises Local min_zoom to avoid conflict."""
+        plan = self.gen._build_export_plan(
+            self.local_extent, 6, 7,
+            include_region=True,
+            region_extent=self.region_extent,
+            region_min_zoom=4,
+            region_max_zoom=6,
+        )
+        # Local min_zoom auto-raised from 6 to 7 (region_max_zoom + 1)
+        local_plan = next(
+            src for src in plan['sources']
+            if src['source_id'] in ('local-detail', 'mbtiles-source')
+        )
+        export_zooms = set(
+            z for entry in local_plan['tiles_by_zoom'] for z in [entry[0]]
+        )
+        self.assertGreater(min(export_zooms), 6)
+        self.assertEqual(plan['gap_zooms'], [])
+        self.assertTrue(
+            any("Local minimum zoom adjusted" in w for w in plan['warnings'])
+        )
+
+    def test_gap_zooms_are_bridged_when_world_and_local_skip_region(self):
+        """World→Local gap is auto-filled when Region is disabled."""
+        plan = self.gen._build_export_plan(
+            self.local_extent, 6, 7,
+            include_world_base_zooms=True,
+            world_max_zoom=3,
+            include_region=False,
+        )
+        # Local min_zoom auto-lowered from 6 to 4 (world_max + 1)
+        self.assertEqual(plan['gap_zooms'], [])
+        self.assertTrue(
+            any("Local minimum zoom adjusted" in w for w in plan['warnings'])
+        )
+
+    def test_region_local_overlap_still_raises_when_no_headroom_to_auto_raise(self):
+        """Region/Local overlap must raise when max_zoom is too low for auto-raise."""
+        with self.assertRaises(SourceConfigError) as ctx:
+            self.gen._build_export_plan(
+                self.local_extent, 9, 9,
+                include_region=True,
+                region_extent=self.region_extent,
+                region_min_zoom=4,
+                region_max_zoom=9,
+            )
+        self.assertEqual(ctx.exception.code, SOURCE_CONFIG_ERROR_REGION_LOCAL_OVERLAP)
+
+    def test_region_containment_accepts_antimeridian_wrapped_extents(self):
+        local_extent = _FakeRectangle(176, -1, -178, 1)
+        region_extent = _FakeRectangle(170, -2, -170, 2)
+        plan = self.gen._build_export_plan(
+            local_extent, 6, 7,
+            include_region=True,
+            region_extent=region_extent,
+            region_min_zoom=4,
+            region_max_zoom=5,
+        )
+        self.assertEqual([src['source_id'] for src in plan['sources']], ['region-detail', 'local-detail'])
+
+    def test_extent_contains_uses_wgs84_transform(self):
+        """_extent_contains should work after WGS84 transform even when extents
+        are in a projected CRS (simulated via _get_bounds_wgs84 returning
+        different coordinates than the raw extent)."""
+        # Simulate a projected CRS where raw coords are large numbers but
+        # _get_bounds_wgs84 maps them to degree-based WGS84 coords.
+        # Region covers [-5,-5,5,5] in WGS84; local covers [-1,-1,1,1] in WGS84.
+        local_projected = _FakeRectangle(100000, 200000, 110000, 210000)
+        region_projected = _FakeRectangle(90000, 190000, 120000, 230000)
+        self.gen._get_bounds_wgs84 = lambda ext: {
+            id(local_projected): [-1, -1, 1, 1],
+            id(region_projected): [-5, -5, 5, 5],
+        }.get(id(ext), [ext.xMinimum(), ext.yMinimum(), ext.xMaximum(), ext.yMaximum()])
+        # Should NOT raise — local is contained in region after WGS84 transform
+        plan = self.gen._build_export_plan(
+            local_projected, 6, 7,
+            include_region=True,
+            region_extent=region_projected,
+            region_min_zoom=4,
+            region_max_zoom=5,
+        )
+        self.assertEqual([src['source_id'] for src in plan['sources']], ['region-detail', 'local-detail'])
+
+    def test_world_max_zoom_exceeds_24_raises(self):
+        """world_max_zoom > 24 should raise SourceConfigError when world base zooms enabled."""
+        with self.assertRaises(SourceConfigError) as ctx:
+            self.gen._build_export_plan(
+                self.local_extent, 26, 28,
+                include_world_base_zooms=True,
+                world_max_zoom=25,
+            )
+        self.assertEqual(ctx.exception.code, SOURCE_CONFIG_ERROR_WORLD_MAX_ZOOM_EXCEEDS_MAX)
+
+    def test_source_plan_signature_differs_for_same_first_last_zooms(self):
+        """Different zoom sets sharing the same first/last must produce different signatures."""
+        plan_a = [{
+            'source_index': 0,
+            'source_id': 'test',
+            'source_bounds': [-10, -10, 10, 10],
+            'export_zooms': [0, 1, 2, 3, 4],
+        }]
+        plan_b = [{
+            'source_index': 0,
+            'source_id': 'test',
+            'source_bounds': [-10, -10, 10, 10],
+            'export_zooms': [0, 4],
+        }]
+        sig_a = SMPGenerator._source_plan_signature(plan_a)
+        sig_b = SMPGenerator._source_plan_signature(plan_b)
+        self.assertNotEqual(sig_a, sig_b, "Signatures must differ when zoom sets differ")
+
+    def test_source_plan_signature_invariant_to_float_repr_quirks(self):
+        """Equivalent bounds with differing trailing-zero noise must hash to same signature."""
+        plan_a = [{
+            'source_index': 0,
+            'source_id': 'test',
+            'source_bounds': [-1.0, -1.0, 1.0, 1.0],
+            'export_zooms': [0, 1, 2],
+        }]
+        plan_b = [{
+            'source_index': 0,
+            'source_id': 'test',
+            'source_bounds': [float(-1), float(-1), float(1), float(1)],
+            'export_zooms': [0, 1, 2],
+        }]
+        sig_a = SMPGenerator._source_plan_signature(plan_a)
+        sig_b = SMPGenerator._source_plan_signature(plan_b)
+        self.assertEqual(sig_a, sig_b)
+
+    def test_world_region_overlap_raises_coded_error(self):
+        """World/Region overlap must raise SourceConfigError with stable code."""
+        with self.assertRaises(SourceConfigError) as ctx:
+            self.gen._build_export_plan(
+                self.local_extent, 6, 7,
+                include_world_base_zooms=True,
+                world_max_zoom=4,
+                include_region=True,
+                region_extent=self.region_extent,
+                region_min_zoom=4,
+                region_max_zoom=5,
+            )
+        self.assertEqual(ctx.exception.code, SOURCE_CONFIG_ERROR_WORLD_REGION_OVERLAP)
+
+    def test_region_local_overlap_is_auto_adjusted(self):
+        """Region/Local overlap auto-raises Local min_zoom with warning."""
+        plan = self.gen._build_export_plan(
+            self.local_extent, 6, 7,
+            include_region=True,
+            region_extent=self.region_extent,
+            region_min_zoom=4,
+            region_max_zoom=6,
+        )
+        local_plan = next(
+            src for src in plan['sources']
+            if src['source_id'] in ('local-detail', 'mbtiles-source')
+        )
+        export_zooms = set(
+            z for entry in local_plan['tiles_by_zoom'] for z in [entry[0]]
+        )
+        # Local should start at 7 (region_max + 1), not at 6
+        self.assertGreater(min(export_zooms), 6)
+        self.assertTrue(
+            any("Local minimum zoom adjusted" in w for w in plan['warnings'])
+        )
+
+    def test_world_local_overlap_raises_coded_error(self):
+        """World/Local overlap (no region) must raise SourceConfigError with stable code."""
+        with self.assertRaises(SourceConfigError) as ctx:
+            self.gen._build_export_plan(
+                self.local_extent, 3, 7,
+                include_world_base_zooms=True,
+                world_max_zoom=3,
+            )
+        self.assertEqual(ctx.exception.code, SOURCE_CONFIG_ERROR_WORLD_LOCAL_OVERLAP)
+
+    def test_region_min_zoom_below_zero_raises(self):
+        """Programmatic callers bypassing UI clamps must hit the range check."""
+        with self.assertRaises(SourceConfigError) as ctx:
+            self.gen._build_export_plan(
+                self.local_extent, 6, 7,
+                include_region=True,
+                region_extent=self.region_extent,
+                region_min_zoom=-1,
+                region_max_zoom=5,
+            )
+        self.assertEqual(
+            ctx.exception.code, SOURCE_CONFIG_ERROR_REGION_ZOOM_OUT_OF_RANGE
+        )
+
+    def test_region_max_zoom_above_24_raises(self):
+        """Region max zoom > 24 must be rejected when supplied directly."""
+        with self.assertRaises(SourceConfigError) as ctx:
+            self.gen._build_export_plan(
+                self.local_extent, 26, 28,
+                include_region=True,
+                region_extent=self.region_extent,
+                region_min_zoom=4,
+                region_max_zoom=25,
+            )
+        self.assertEqual(
+            ctx.exception.code, SOURCE_CONFIG_ERROR_REGION_ZOOM_OUT_OF_RANGE
+        )
+
+    def test_region_min_greater_than_max_raises_coded_error(self):
+        """Inverted region zoom range must raise SourceConfigError with stable code."""
+        with self.assertRaises(SourceConfigError) as ctx:
+            self.gen._build_export_plan(
+                self.local_extent, 8, 10,
+                include_region=True,
+                region_extent=self.region_extent,
+                region_min_zoom=6,
+                region_max_zoom=4,
+            )
+        self.assertEqual(
+            ctx.exception.code, SOURCE_CONFIG_ERROR_REGION_ZOOM_INVERTED
+        )
+
+
+    def test_new_default_params_succeed(self):
+        """New defaults (min_zoom=8, world enabled, world_max_zoom=3) auto-fill gap."""
+        plan = self.gen._build_export_plan(
+            self.local_extent, 8, 14,
+            include_world_base_zooms=True,
+            world_max_zoom=3,
+        )
+        source_ids = [src['source_id'] for src in plan['sources']]
+        self.assertIn('world-overview', source_ids)
+        self.assertIn('local-detail', source_ids)
+        # Gap zooms 4-7 are auto-filled by lowering Local min to 4
+        self.assertEqual(plan['gap_zooms'], [])
+        self.assertTrue(
+            any("Local minimum zoom adjusted" in w for w in plan['warnings'])
+        )
+
+    def test_old_default_params_raise_source_config_error(self):
+        """Old defaults (min_zoom=0, world enabled, world_max_zoom=3) must fail.
+
+        Documents the intentional breaking change from the fixed-slot model:
+        validation at _validate_fixed_source_configuration rejects
+        world_max_zoom (3) >= min_zoom (0) when world is enabled and
+        region is disabled.
+        """
+        with self.assertRaises(SourceConfigError) as ctx:
+            self.gen._build_export_plan(
+                self.local_extent, 0, 14,
+                include_world_base_zooms=True,
+                world_max_zoom=3,
+            )
+        self.assertEqual(ctx.exception.code, SOURCE_CONFIG_ERROR_WORLD_LOCAL_OVERLAP)
+
+    def test_crs_transform_failure_in_validation_raises_source_config_error(self):
+        """CRS transform failure during region validation produces a SourceConfigError."""
+        self.gen._get_bounds_wgs84 = MagicMock(side_effect=RuntimeError('CRS error'))
+
+        with self.assertRaises(SourceConfigError) as ctx:
+            self.gen._build_export_plan(
+                self.local_extent, 6, 7,
+                include_region=True,
+                region_extent=self.region_extent,
+                region_min_zoom=4,
+                region_max_zoom=5,
+            )
+        self.assertEqual(ctx.exception.code, SOURCE_CONFIG_ERROR_CRS_TRANSFORM)
+
 
 class TestValidateDiskSpace(unittest.TestCase):
     """Test disk space validation."""
@@ -475,6 +819,7 @@ class TestTileGridRects(unittest.TestCase):
         self.gen._get_bounds_wgs84 = lambda ext: [
             ext.xMinimum(), ext.yMinimum(), ext.xMaximum(), ext.yMaximum()
         ]
+        self.gen.get_world_extent = MagicMock(return_value=_FakeRectangle(-180, -85, 180, 85))
 
     def _make_extent(self, west, south, east, north):
         return _FakeRectangle(west, south, east, north)
@@ -487,12 +832,18 @@ class TestTileGridRects(unittest.TestCase):
         self.assertEqual(r['zoom'], 0)
         self.assertEqual(r['x'], 0)
         self.assertEqual(r['y'], 0)
+        self.assertEqual(r['source_index'], 0)
+        self.assertEqual(r['source_id'], 'mbtiles-source')
+        self.assertEqual(r['source_role'], 'local')
 
     def test_rect_has_required_keys(self):
         extent = self._make_extent(0, 0, 1, 1)
         rects = self.gen.get_tile_grid_rects(extent, 0, 0)
         self.assertGreater(len(rects), 0)
-        for key in ('zoom', 'x', 'y', 'west', 'south', 'east', 'north'):
+        for key in (
+            'zoom', 'x', 'y', 'west', 'south', 'east', 'north',
+            'source_index', 'source_id', 'source_role'
+        ):
             self.assertIn(key, rects[0])
 
     def test_rect_count_matches_estimate(self):
@@ -504,7 +855,6 @@ class TestTileGridRects(unittest.TestCase):
 
     def test_rect_count_matches_world_enabled_estimate(self):
         extent = self._make_extent(-1, -1, 1, 1)
-        self.gen.get_world_extent = MagicMock(return_value=_FakeRectangle(-180, -85, 180, 85))
         rects = self.gen.get_tile_grid_rects(
             extent, 6, 7,
             include_world_base_zooms=True,
@@ -516,6 +866,23 @@ class TestTileGridRects(unittest.TestCase):
             world_max_zoom=3
         )
         self.assertEqual(len(rects), estimated)
+
+    def test_region_enabled_rects_include_sparse_source_indices(self):
+        extent = self._make_extent(-1, -1, 1, 1)
+        region_extent = self._make_extent(-2, -2, 2, 2)
+        rects = self.gen.get_tile_grid_rects(
+            extent, 6, 7,
+            include_world_base_zooms=True,
+            world_max_zoom=3,
+            include_region=True,
+            region_extent=region_extent,
+            region_min_zoom=4,
+            region_max_zoom=5,
+        )
+        source_indices = {rect['source_index'] for rect in rects}
+        source_ids = {rect['source_id'] for rect in rects}
+        self.assertEqual(source_indices, {0, 1, 2})
+        self.assertEqual(source_ids, {'world-overview', 'region-detail', 'local-detail'})
 
     def test_wgs84_bounds_ordering(self):
         """Each rect must satisfy west < east and south < north."""
@@ -646,16 +1013,38 @@ class TestCreateStyleJson(unittest.TestCase):
         style = self.gen._create_style_from_canvas(self._make_extent(), 10, 10)
         self.assertEqual(style['zoom'], 10)
 
-    def test_style_minzoom_uses_zero_when_world_base_zooms_enabled(self):
+    def test_style_contains_world_and_local_sources_when_world_enabled(self):
         style = self.gen._create_style_from_canvas(
             self._make_extent(), 6, 12,
             include_world_base_zooms=True,
             world_max_zoom=3
         )
-        source = list(style['sources'].values())[0]
-        self.assertEqual(source['minzoom'], 0)
-        self.assertEqual(source['maxzoom'], 12)
-        self.assertEqual(source['bounds'], [-180.0, -85.0511, 180.0, 85.0511])
+        self.assertEqual(list(style['sources'].keys()), ['world-overview', 'local-detail'])
+        world_source = style['sources']['world-overview']
+        local_source = style['sources']['local-detail']
+        self.assertEqual(world_source['minzoom'], 0)
+        self.assertEqual(world_source['maxzoom'], 3)
+        self.assertEqual(world_source['bounds'], [-180.0, -85.0511, 180.0, 85.0511])
+        # Auto-fill lowers Local minzoom from 6 to 4 to bridge World→Local gap
+        self.assertEqual(local_source['minzoom'], 4)
+        self.assertEqual(local_source['maxzoom'], 12)
+        self.assertEqual(style['metadata']['smp:sourceFolders']['world-overview'], 's/0')
+        self.assertEqual(style['metadata']['smp:sourceFolders']['local-detail'], 's/2')
+
+
+    def test_style_contains_world_and_local_with_new_defaults(self):
+        """Fallback path (no source_plans) with min_zoom=4, world enabled."""
+        style = self.gen._create_style_from_canvas(
+            self._make_extent(), 4, 12,
+            include_world_base_zooms=True,
+            world_max_zoom=3
+        )
+        self.assertEqual(
+            list(style['sources'].keys()),
+            ['world-overview', 'local-detail']
+        )
+        self.assertEqual(style['sources']['world-overview']['maxzoom'], 3)
+        self.assertEqual(style['sources']['local-detail']['minzoom'], 4)
 
 
 class TestCalculateTilesAtZoom(unittest.TestCase):
@@ -775,7 +1164,7 @@ class TestWorldBaseZoomGeneration(unittest.TestCase):
             finally:
                 shutil.rmtree(tmp, ignore_errors=True)
 
-        self.assertEqual(sorted(set(seen_zooms)), [0, 1, 2, 3, 6, 7])
+        self.assertEqual(sorted(set(seen_zooms)), [0, 1, 2, 3, 4, 5, 6, 7])
 
 class TestProgressSmoothing(unittest.TestCase):
     """Progress setProgress() should only be called when pct changes."""
@@ -1065,7 +1454,7 @@ class TestCacheDirectory(unittest.TestCase):
         finally:
             shutil.rmtree(cache, ignore_errors=True)
 
-    def test_resume_skips_existing_tiles(self):
+    def test_resume_skips_existing_local_tiles(self):
         """Tiles already on disk are not re-rendered when resume=True."""
         gen = SMPGenerator()
         gen._get_bounds_wgs84 = MagicMock(return_value=[-1, -1, 1, 1])
@@ -1074,7 +1463,7 @@ class TestCacheDirectory(unittest.TestCase):
 
         tmp = tempfile.mkdtemp()
         try:
-            # Pre-create the tile file at source_index=0 path
+            # Pre-create the local tile file at legacy single-source_index=0.
             zoom_dir = os.path.join(tmp, '0', '0', '0')
             os.makedirs(zoom_dir, exist_ok=True)
             tile_path = os.path.join(zoom_dir, '0.png')
@@ -1093,7 +1482,6 @@ class TestCacheDirectory(unittest.TestCase):
                     tile_format='PNG', resume=True
                 )
 
-            # QImage should NOT have been called because tile already existed
             render_mock.assert_not_called()
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -1232,7 +1620,8 @@ class TestCacheDirectory(unittest.TestCase):
             shutil.rmtree(out_dir, ignore_errors=True)
 
     def test_generate_with_cache_dir_includes_world_low_zoom_tiles_in_manifest(self):
-        """Cache-backed exports must archive world tiles added below selected min zoom."""
+        """Cache-backed exports must archive world tiles added below selected min zoom.
+        Stale tiles outside the auto-adjusted range are excluded."""
         gen = SMPGenerator()
         gen.validate_tile_count = MagicMock(return_value=(6, None))
         gen.validate_extent_size = MagicMock(return_value=None)
@@ -1249,13 +1638,12 @@ class TestCacheDirectory(unittest.TestCase):
             import json
             # World source tiles (source_index=0): zooms 0-3
             world_tiles = [(0, 0, 0), (1, 0, 0), (2, 0, 0), (3, 0, 0)]
-            # Region source tiles (source_index=1): zooms 6-7
-            region_tiles = [(6, 0, 0), (7, 0, 0)]
-            stale_tiles = [(5, 0, 0)]
+            # Local source tiles (source_index=2): zooms 6-7
+            local_tiles = [(6, 0, 0), (7, 0, 0)]
+            stale_tiles = [(8, 0, 0)]
 
-            for zoom, x, y in world_tiles + region_tiles + stale_tiles:
-                # World tiles go under source_index=0, region under source_index=1
-                src_idx = 0 if (zoom, x, y) in world_tiles else 1
+            for zoom, x, y in world_tiles + local_tiles + stale_tiles:
+                src_idx = 0 if (zoom, x, y) in world_tiles else 2
                 tile_dir = os.path.join(cache, str(src_idx), str(zoom), str(x))
                 os.makedirs(tile_dir, exist_ok=True)
                 with open(os.path.join(tile_dir, f'{y}.png'), 'wb') as fh:
@@ -1265,8 +1653,8 @@ class TestCacheDirectory(unittest.TestCase):
                 meta = {}
                 for z, x, y in world_tiles:
                     meta[f"0/{z}/{x}/{y}"] = "PNG:85:any"
-                for z, x, y in region_tiles:
-                    meta[f"1/{z}/{x}/{y}"] = "PNG:85:any"
+                for z, x, y in local_tiles:
+                    meta[f"2/{z}/{x}/{y}"] = "PNG:85:any"
                 json.dump(meta, fh)
 
             out_path = os.path.join(out_dir, 'world-cache.smp')
@@ -1286,11 +1674,12 @@ class TestCacheDirectory(unittest.TestCase):
 
             for zoom, x, y in world_tiles:
                 self.assertIn(f's/0/{zoom}/{x}/{y}.png', names)
-            for zoom, x, y in region_tiles:
-                self.assertIn(f's/1/{zoom}/{x}/{y}.png', names)
-            self.assertNotIn('s/0/5/0/0.png', names)
-            self.assertNotIn('s/1/5/0/0.png', names)
+            for zoom, x, y in local_tiles:
+                self.assertIn(f's/2/{zoom}/{x}/{y}.png', names)
+            self.assertNotIn('s/0/8/0/0.png', names)
+            self.assertNotIn('s/2/8/0/0.png', names)
             self.assertNotIn(f's/0/{TileCache.META_FILE}', names)
+            self.assertNotIn(f's/2/{TileCache.META_FILE}', names)
         finally:
             shutil.rmtree(cache, ignore_errors=True)
             shutil.rmtree(out_dir, ignore_errors=True)
@@ -1330,6 +1719,12 @@ class TestLowZoomStyleOutput(unittest.TestCase):
                 'source_index': 1,
                 'source_bounds': [-10, -10, 10, 10],
                 'export_zooms': [3, 4, 5],
+            },
+            {
+                'source_id': 'local-detail',
+                'source_index': 2,
+                'source_bounds': [-1, -1, 1, 1],
+                'export_zooms': [6, 7],
             },
         ]
 
@@ -2015,6 +2410,113 @@ class TestCheckParameterValues(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(msg, '')
 
+    def test_world_overview_toggle_defaults_on(self):
+        """The legacy-compatible UI should default the World overview source to enabled."""
+        algo = self._make_algorithm()
+        algo.addParameter = MagicMock()
+        bool_ctor = algo.initAlgorithm.__globals__['QgsProcessingParameterBoolean']
+        bool_ctor.reset_mock()
+
+        algo.initAlgorithm(None)
+
+        world_calls = [
+            call for call in bool_ctor.call_args_list
+            if call.args and call.args[0] == algo.INCLUDE_WORLD_BASE_ZOOMS
+        ]
+        self.assertEqual(len(world_calls), 1)
+        self.assertTrue(world_calls[0].kwargs['defaultValue'])
+
+    def test_region_parameter_help_explains_default_zoom_order(self):
+        """Region UI help should make the default zoom conflict actionable."""
+        algo = self._make_algorithm()
+        algo.addParameter = MagicMock()
+
+        def parameter_factory(*args, **kwargs):
+            parameter = MagicMock()
+            parameter.parameter_id = args[0]
+            return parameter
+
+        bool_ctor = algo.initAlgorithm.__globals__['QgsProcessingParameterBoolean']
+        extent_ctor = algo.initAlgorithm.__globals__['QgsProcessingParameterExtent']
+        number_ctor = algo.initAlgorithm.__globals__['QgsProcessingParameterNumber']
+        bool_ctor.reset_mock()
+        extent_ctor.reset_mock()
+        number_ctor.reset_mock()
+        bool_ctor.side_effect = parameter_factory
+        extent_ctor.side_effect = parameter_factory
+        number_ctor.side_effect = parameter_factory
+
+        algo.initAlgorithm(None)
+
+        region_params = [
+            call.args[0] for call in algo.addParameter.call_args_list
+            if getattr(call.args[0], 'parameter_id', None) in (
+                algo.INCLUDE_REGION,
+                algo.REGION_EXTENT,
+                algo.REGION_MIN_ZOOM,
+                algo.REGION_MAX_ZOOM,
+            )
+        ]
+        self.assertEqual(len(region_params), 4)
+        include_region_param = next(
+            param for param in region_params
+            if param.parameter_id == algo.INCLUDE_REGION
+        )
+        help_text = include_region_param.setHelp.call_args.args[0]
+        self.assertIn('World maximum zoom < Region minimum zoom', help_text)
+        self.assertIn('automatically raised', help_text)
+
+    def test_world_max_zoom_parameter_is_optional(self):
+        """World maximum zoom should not remain required when World is disabled."""
+        algo = self._make_algorithm()
+        algo.addParameter = MagicMock()
+        number_ctor = algo.initAlgorithm.__globals__['QgsProcessingParameterNumber']
+        number_ctor.reset_mock()
+
+        algo.initAlgorithm(None)
+
+        world_zoom_calls = [
+            call for call in number_ctor.call_args_list
+            if call.args and call.args[0] == algo.WORLD_MAX_ZOOM
+        ]
+        self.assertEqual(len(world_zoom_calls), 1)
+        self.assertTrue(world_zoom_calls[0].kwargs['optional'])
+
+    def test_source_configuration_ignores_world_zoom_when_world_disabled(self):
+        """Disabled World should carry a default zoom without reading the optional input."""
+        algo = self._make_algorithm()
+
+        def bool_value(_p, key, _c):
+            return False
+
+        def int_value(_p, key, _c):
+            if key == algo.WORLD_MAX_ZOOM:
+                raise AssertionError('WORLD_MAX_ZOOM should not be read when World is disabled')
+            return 0
+
+        algo.parameterAsBool = MagicMock(side_effect=bool_value)
+        algo.parameterAsInt = MagicMock(side_effect=int_value)
+
+        config = algo._source_configuration({}, MagicMock())
+
+        self.assertFalse(config['include_world_base_zooms'])
+        self.assertEqual(config['world_max_zoom'], 3)
+
+    def test_source_configuration_defaults_unset_world_zoom_when_enabled(self):
+        """Enabled World keeps a sensible default if the optional zoom input is blank."""
+        algo = self._make_algorithm()
+
+        def bool_value(_p, key, _c):
+            return key == algo.INCLUDE_WORLD_BASE_ZOOMS
+
+        algo.parameterAsBool = MagicMock(side_effect=bool_value)
+        algo.parameterAsInt = MagicMock(return_value=None)
+
+        config = algo._source_configuration({}, MagicMock())
+
+        self.assertTrue(config['include_world_base_zooms'])
+        self.assertEqual(config['world_max_zoom'], 3)
+
     def test_non_integer_enum_value_blocked(self):
         algo = self._make_algorithm()
         extent = self._make_extent(0, 0, 1, 1)
@@ -2112,6 +2614,267 @@ class TestCheckParameterValues(unittest.TestCase):
         self.assertIn('WEBP', str(ctx.exception))
         generate_smp.assert_not_called()
 
+    def test_new_default_params_pass_check_parameter_values(self):
+        """New defaults (min_zoom=8, world enabled, world_max_zoom=3) must pass checkParameterValues."""
+        algo = self._make_algorithm()
+        extent = self._make_extent(0, 0, 1, 1)
+        algo.parameterAsExtent = MagicMock(return_value=extent)
+        algo.parameterAsInt = MagicMock(
+            side_effect=lambda p, k, c: (
+                8 if k == 'MIN_ZOOM' else (
+                    3 if k == 'WORLD_MAX_ZOOM' else (
+                        None if k in ('REGION_MIN_ZOOM', 'REGION_MAX_ZOOM') else 14
+                    )
+                )
+            )
+        )
+
+        def bool_value(_p, key, _c):
+            return key == algo.INCLUDE_WORLD_BASE_ZOOMS
+
+        algo.parameterAsBool = MagicMock(side_effect=bool_value)
+        algo.parameterAsEnum = MagicMock(return_value=0)
+        algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
+
+        import comapeo_smp_generator as _gen_mod
+        with patch.object(_gen_mod.SMPGenerator, 'validate_disk_space'), \
+             patch.object(_gen_mod.SMPGenerator, 'get_world_extent',
+                          return_value=_FakeRectangle(-180, -85.0511, 180, 85.0511)), \
+             patch.object(_gen_mod.SMPGenerator, '_get_bounds_wgs84',
+                          return_value=[0, 0, 1, 1]):
+            ok, msg = algo.checkParameterValues({}, MagicMock())
+
+        self.assertTrue(ok)
+        self.assertEqual(msg, '')
+
+    def test_overlapping_region_local_zooms_are_auto_adjusted(self):
+        """Region/Local zoom overlap is auto-raised, not rejected."""
+        algo = self._make_algorithm()
+        local_extent = self._make_extent(0, 0, 1, 1)
+        region_extent = self._make_extent(-1, -1, 2, 2)
+
+        int_values = {
+            algo.MIN_ZOOM: 4,
+            algo.MAX_ZOOM: 14,
+            algo.WORLD_MAX_ZOOM: 3,
+            algo.REGION_MIN_ZOOM: 6,
+            algo.REGION_MAX_ZOOM: 9,
+        }
+
+        def bool_value(_p, key, _c):
+            return key in (algo.INCLUDE_WORLD_BASE_ZOOMS, algo.INCLUDE_REGION)
+
+        def extent_value(_p, key, _c):
+            if key == algo.REGION_EXTENT:
+                return region_extent
+            return local_extent
+
+        algo.parameterAsExtent = MagicMock(side_effect=extent_value)
+        algo.parameterAsInt = MagicMock(side_effect=lambda _p, key, _c: int_values[key])
+        algo.parameterAsBool = MagicMock(side_effect=bool_value)
+        algo.parameterAsEnum = MagicMock(return_value=0)
+        algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
+
+        import comapeo_smp_generator as _gen_mod
+        with patch.object(_gen_mod.SMPGenerator, 'validate_disk_space'), \
+             patch.object(_gen_mod.SMPGenerator, 'get_world_extent',
+                          return_value=_FakeRectangle(-180, -85.0511, 180, 85.0511)), \
+             patch.object(_gen_mod.SMPGenerator, '_get_bounds_wgs84',
+                          side_effect=lambda extent: [
+                              extent.xMinimum(), extent.yMinimum(),
+                              extent.xMaximum(), extent.yMaximum()
+                          ]):
+            ok, msg = algo.checkParameterValues({}, MagicMock())
+
+        # Auto-raise handles the overlap, so validation passes
+        self.assertTrue(ok)
+        self.assertEqual(msg, '')
+
+    def test_world_local_overlap_without_region_reports_actionable_hint(self):
+        """World enabled with Region disabled and overlapping zooms should suggest raising Local min."""
+        algo = self._make_algorithm()
+        local_extent = self._make_extent(0, 0, 1, 1)
+
+        int_values = {
+            algo.MIN_ZOOM: 2,
+            algo.MAX_ZOOM: 14,
+            algo.WORLD_MAX_ZOOM: 3,
+            algo.REGION_MIN_ZOOM: 6,
+            algo.REGION_MAX_ZOOM: 9,
+        }
+
+        def bool_value(_p, key, _c):
+            return key == algo.INCLUDE_WORLD_BASE_ZOOMS
+
+        algo.parameterAsExtent = MagicMock(return_value=local_extent)
+        algo.parameterAsInt = MagicMock(side_effect=lambda _p, key, _c: int_values[key])
+        algo.parameterAsBool = MagicMock(side_effect=bool_value)
+
+        import comapeo_smp_generator as _gen_mod
+        with patch.object(_gen_mod.SMPGenerator, '_get_bounds_wgs84',
+                          side_effect=lambda extent: [
+                              extent.xMinimum(), extent.yMinimum(),
+                              extent.xMaximum(), extent.yMaximum()
+                          ]):
+            ok, msg = algo.checkParameterValues({}, MagicMock())
+
+        self.assertFalse(ok)
+        self.assertIn('World maximum zoom (3) must be less than Local minimum zoom (2)', msg)
+        self.assertIn('Raise Local minimum zoom above World maximum zoom', msg)
+
+    def test_region_enabled_with_valid_zooms_passes_check_parameter_values(self):
+        """Enabling Region with valid world<region<local zooms must pass validation."""
+        algo = self._make_algorithm()
+        local_extent = self._make_extent(0, 0, 1, 1)
+        region_extent = self._make_extent(-1, -1, 2, 2)
+
+        int_values = {
+            algo.MIN_ZOOM: 7,
+            algo.MAX_ZOOM: 10,
+            algo.WORLD_MAX_ZOOM: 3,
+            algo.REGION_MIN_ZOOM: 4,
+            algo.REGION_MAX_ZOOM: 6,
+        }
+
+        def bool_value(_p, key, _c):
+            return key in (algo.INCLUDE_WORLD_BASE_ZOOMS, algo.INCLUDE_REGION)
+
+        def extent_value(_p, key, _c):
+            if key == algo.REGION_EXTENT:
+                return region_extent
+            return local_extent
+
+        algo.parameterAsExtent = MagicMock(side_effect=extent_value)
+        algo.parameterAsInt = MagicMock(side_effect=lambda _p, key, _c: int_values[key])
+        algo.parameterAsBool = MagicMock(side_effect=bool_value)
+        algo.parameterAsEnum = MagicMock(return_value=0)
+        algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
+
+        import comapeo_smp_generator as _gen_mod
+        with patch.object(_gen_mod.SMPGenerator, 'validate_disk_space'), \
+             patch.object(_gen_mod.SMPGenerator, 'get_world_extent',
+                          return_value=_FakeRectangle(-180, -85.0511, 180, 85.0511)), \
+             patch.object(_gen_mod.SMPGenerator, '_get_bounds_wgs84',
+                          side_effect=lambda extent: [
+                              extent.xMinimum(), extent.yMinimum(),
+                              extent.xMaximum(), extent.yMaximum()
+                          ]):
+            ok, msg = algo.checkParameterValues({}, MagicMock())
+
+        self.assertTrue(ok)
+        self.assertEqual(msg, '')
+
+    def test_region_min_zoom_equals_max_zoom_is_accepted(self):
+        """A single-zoom region (region_min == region_max) should pass validation."""
+        algo = self._make_algorithm()
+        local_extent = self._make_extent(0, 0, 1, 1)
+        region_extent = self._make_extent(-1, -1, 2, 2)
+
+        int_values = {
+            algo.MIN_ZOOM: 7,
+            algo.MAX_ZOOM: 10,
+            algo.WORLD_MAX_ZOOM: 3,
+            algo.REGION_MIN_ZOOM: 5,
+            algo.REGION_MAX_ZOOM: 5,
+        }
+
+        def bool_value(_p, key, _c):
+            return key in (algo.INCLUDE_WORLD_BASE_ZOOMS, algo.INCLUDE_REGION)
+
+        def extent_value(_p, key, _c):
+            if key == algo.REGION_EXTENT:
+                return region_extent
+            return local_extent
+
+        algo.parameterAsExtent = MagicMock(side_effect=extent_value)
+        algo.parameterAsInt = MagicMock(side_effect=lambda _p, key, _c: int_values[key])
+        algo.parameterAsBool = MagicMock(side_effect=bool_value)
+        algo.parameterAsEnum = MagicMock(return_value=0)
+        algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
+
+        import comapeo_smp_generator as _gen_mod
+        with patch.object(_gen_mod.SMPGenerator, 'validate_disk_space'), \
+             patch.object(_gen_mod.SMPGenerator, 'get_world_extent',
+                          return_value=_FakeRectangle(-180, -85.0511, 180, 85.0511)), \
+             patch.object(_gen_mod.SMPGenerator, '_get_bounds_wgs84',
+                          side_effect=lambda extent: [
+                              extent.xMinimum(), extent.yMinimum(),
+                              extent.xMaximum(), extent.yMaximum()
+                          ]):
+            ok, msg = algo.checkParameterValues({}, MagicMock())
+
+        self.assertTrue(ok)
+        self.assertEqual(msg, '')
+
+    def test_world_max_zoom_zero_is_accepted(self):
+        """World enabled with world_max_zoom=0 and region disabled should pass."""
+        algo = self._make_algorithm()
+        local_extent = self._make_extent(0, 0, 1, 1)
+
+        int_values = {
+            algo.MIN_ZOOM: 1,
+            algo.MAX_ZOOM: 5,
+            algo.WORLD_MAX_ZOOM: 0,
+            algo.REGION_MIN_ZOOM: None,
+            algo.REGION_MAX_ZOOM: None,
+        }
+
+        def bool_value(_p, key, _c):
+            return key == algo.INCLUDE_WORLD_BASE_ZOOMS
+
+        algo.parameterAsExtent = MagicMock(return_value=local_extent)
+        algo.parameterAsInt = MagicMock(side_effect=lambda _p, key, _c: int_values[key])
+        algo.parameterAsBool = MagicMock(side_effect=bool_value)
+        algo.parameterAsEnum = MagicMock(return_value=0)
+        algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
+
+        import comapeo_smp_generator as _gen_mod
+        with patch.object(_gen_mod.SMPGenerator, 'validate_disk_space'), \
+             patch.object(_gen_mod.SMPGenerator, 'get_world_extent',
+                          return_value=_FakeRectangle(-180, -85.0511, 180, 85.0511)), \
+             patch.object(_gen_mod.SMPGenerator, '_get_bounds_wgs84',
+                          return_value=[0, 0, 1, 1]):
+            ok, msg = algo.checkParameterValues({}, MagicMock())
+
+        self.assertTrue(ok)
+        self.assertEqual(msg, '')
+
+    def test_region_extent_equal_to_local_extent_is_accepted(self):
+        """Region extent identical to the local extent should pass validation."""
+        algo = self._make_algorithm()
+        shared_extent = self._make_extent(0, 0, 1, 1)
+
+        int_values = {
+            algo.MIN_ZOOM: 7,
+            algo.MAX_ZOOM: 10,
+            algo.WORLD_MAX_ZOOM: 3,
+            algo.REGION_MIN_ZOOM: 4,
+            algo.REGION_MAX_ZOOM: 6,
+        }
+
+        def bool_value(_p, key, _c):
+            return key in (algo.INCLUDE_WORLD_BASE_ZOOMS, algo.INCLUDE_REGION)
+
+        algo.parameterAsExtent = MagicMock(return_value=shared_extent)
+        algo.parameterAsInt = MagicMock(side_effect=lambda _p, key, _c: int_values[key])
+        algo.parameterAsBool = MagicMock(side_effect=bool_value)
+        algo.parameterAsEnum = MagicMock(return_value=0)
+        algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
+
+        import comapeo_smp_generator as _gen_mod
+        with patch.object(_gen_mod.SMPGenerator, 'validate_disk_space'), \
+             patch.object(_gen_mod.SMPGenerator, 'get_world_extent',
+                          return_value=_FakeRectangle(-180, -85.0511, 180, 85.0511)), \
+             patch.object(_gen_mod.SMPGenerator, '_get_bounds_wgs84',
+                          side_effect=lambda extent: [
+                              extent.xMinimum(), extent.yMinimum(),
+                              extent.xMaximum(), extent.yMaximum()
+                          ]):
+            ok, msg = algo.checkParameterValues({}, MagicMock())
+
+        self.assertTrue(ok)
+        self.assertEqual(msg, '')
+
     def test_empty_extent_skips_generator(self):
         """An empty extent should not call the generator (return True to let processAlgorithm handle it)."""
         algo = self._make_algorithm()
@@ -2127,19 +2890,19 @@ class TestCheckParameterValues(unittest.TestCase):
 
 
     def test_world_max_zoom_out_of_range_fails_when_enabled(self):
-        """Enabled world-base-zooms must reject values outside 3..5."""
+        """Enabled world-base-zooms must reject negative values."""
         algo = self._make_algorithm()
         extent = self._make_extent(0, 0, 1, 1)
         algo.parameterAsExtent = MagicMock(return_value=extent)
         algo.parameterAsInt = MagicMock(
-            side_effect=lambda p, k, c: 0 if k == 'MIN_ZOOM' else (6 if k == 'WORLD_MAX_ZOOM' else 5)
+            side_effect=lambda p, k, c: 0 if k == 'MIN_ZOOM' else (-1 if k == 'WORLD_MAX_ZOOM' else 5)
         )
         algo.parameterAsBool = MagicMock(return_value=True)
 
         ok, msg = algo.checkParameterValues({}, MagicMock())
 
         self.assertFalse(ok)
-        self.assertIn('between 3 and 5', msg)
+        self.assertIn('greater than or equal to 0', msg)
 
     def test_default_tile_format_index_prefers_webp_when_supported(self):
         """WEBP should remain the default when runtime encoding support exists."""
@@ -2212,12 +2975,16 @@ class TestCheckParameterValues(unittest.TestCase):
         int_values = {
             algo.MIN_ZOOM: 2,
             algo.MAX_ZOOM: 5,
-            algo.WORLD_MAX_ZOOM: 3,
+            algo.WORLD_MAX_ZOOM: 1,
             algo.JPEG_QUALITY: 85,
         }
+
+        def bool_value(_p, key, _c):
+            return key == algo.INCLUDE_WORLD_BASE_ZOOMS
+
         algo.parameterAsExtent = MagicMock(return_value=extent)
         algo.parameterAsInt = MagicMock(side_effect=lambda _p, key, _c: int_values[key])
-        algo.parameterAsBool = MagicMock(return_value=True)
+        algo.parameterAsBool = MagicMock(side_effect=bool_value)
         algo.parameterAsEnum = MagicMock(return_value=algo.TILE_FORMAT_OPTIONS.index('PNG'))
         algo.parameterAsFileOutput = MagicMock(return_value='/tmp/test.smp')
 
@@ -2227,6 +2994,7 @@ class TestCheckParameterValues(unittest.TestCase):
             'world_coverage_tiles': 85,
             'world_tiles': 1365,
             'world_pct': (85 / 1365) * 100,
+            'gap_zooms': [],
             'source_bounds': [-180.0, -85.0511, 180.0, 85.0511],
             'sources': [],
         }
@@ -2569,7 +3337,7 @@ class TestVersionFileInArchive(unittest.TestCase):
 
 
 class TestSourceFoldersValue(unittest.TestCase):
-    """smp:sourceFolders value must be 's/0', not '0'."""
+    """smp:sourceFolders value must use legacy single-source slot 's/0'."""
 
     def setUp(self):
         self.gen = SMPGenerator()
@@ -2578,7 +3346,7 @@ class TestSourceFoldersValue(unittest.TestCase):
     def _make_extent(self):
         return _FakeRectangle(-10, -10, 10, 10)
 
-    def test_source_folders_value_is_s_slash_0(self):
+    def test_source_folders_value_uses_legacy_single_source_slot(self):
         style = self.gen._create_style_from_canvas(self._make_extent(), 0, 10)
         source_id = list(style['sources'].keys())[0]
         self.assertEqual(style['metadata']['smp:sourceFolders'][source_id], 's/0')
@@ -3503,10 +4271,11 @@ class TestSMPValidation(unittest.TestCase):
             style = json.loads(zf.read('style.json'))
             archive_names = set(zf.namelist())
 
-        source = list(style['sources'].values())[0]
+        source_id, source = next(iter(style['sources'].items()))
         tile_ext = source.get('format', 'png')
-        # At minimum, zoom 0 tile (0,0,0) must exist
-        self.assertIn(f's/0/0/0/0.{tile_ext}', archive_names)
+        source_folder = style['metadata']['smp:sourceFolders'][source_id]
+        # At minimum, zoom 0 tile (0,0,0) must exist in the declared source folder
+        self.assertIn(f'{source_folder}/0/0/0.{tile_ext}', archive_names)
 
 
 class TestZipCompressionMethods(unittest.TestCase):
@@ -3645,6 +4414,44 @@ class TestBuildSingleSourcePlan(unittest.TestCase):
         self.assertGreater(plan['total_tiles'], 0)
 
 
+class TestSourceSlotForPlanFallbacks(unittest.TestCase):
+    """Tests for SMPGenerator._source_slot_for_plan fallback tiers."""
+
+    def test_source_slot_for_plan_falls_back_to_index_when_id_unknown(self):
+        slot = SMPGenerator._source_slot_for_plan({
+            'source_id': 'unknown-id',
+            'source_index': 1,
+        })
+        self.assertEqual(slot['role'], 'region')
+        self.assertEqual(slot['name'], 'Region Detail')
+        self.assertEqual(slot['layer_id'], 'region-raster')
+        self.assertEqual(slot['source_index'], 1)
+        self.assertEqual(slot['source_id'], 'unknown-id')
+
+    def test_source_slot_for_plan_synthesizes_slot_when_id_and_index_unknown(self):
+        slot = SMPGenerator._source_slot_for_plan({
+            'source_id': 'unknown',
+            'source_index': 99,
+        })
+        self.assertEqual(slot['role'], 'source-99')
+        self.assertEqual(slot['name'], 'unknown')
+        self.assertEqual(slot['layer_id'], 'source-99-raster')
+        self.assertEqual(slot['source_index'], 99)
+        self.assertEqual(slot['source_id'], 'unknown')
+
+    def test_source_slot_for_plan_resolves_legacy_mbtiles_source(self):
+        slot = SMPGenerator._source_slot_for_plan({
+            'source_id': 'mbtiles-source',
+            'source_index': 0,
+            'source_role': 'local',
+            'layer_id': 'raster',
+        })
+        self.assertEqual(slot['role'], 'local')
+        self.assertEqual(slot['layer_id'], 'raster')
+        self.assertEqual(slot['source_id'], 'mbtiles-source')
+        self.assertEqual(slot['source_index'], 0)
+
+
 class TestMultiSourceExportPlan(unittest.TestCase):
     """Tests for _build_export_plan with separate sources."""
 
@@ -3683,8 +4490,8 @@ class TestMultiSourceExportPlan(unittest.TestCase):
         self.assertEqual(len(plan['sources']), 2)
         self.assertEqual(plan['sources'][0]['source_id'], 'world-overview')
         self.assertEqual(plan['sources'][0]['source_index'], 0)
-        self.assertEqual(plan['sources'][1]['source_id'], 'region-detail')
-        self.assertEqual(plan['sources'][1]['source_index'], 1)
+        self.assertEqual(plan['sources'][1]['source_id'], 'local-detail')
+        self.assertEqual(plan['sources'][1]['source_index'], 2)
 
     def test_world_source_zooms_start_at_zero(self):
         plan = self.gen._build_export_plan(
@@ -3695,40 +4502,37 @@ class TestMultiSourceExportPlan(unittest.TestCase):
         self.assertEqual(world_source['export_zooms'][0], 0)
         self.assertEqual(world_source['export_zooms'][-1], 3)
 
-    def test_world_source_max_zoom_supports_upper_bound_5(self):
-        """World source should include the full supported user-facing range up to zoom 5."""
+    def test_world_source_max_zoom_supports_upper_bound_4_before_local(self):
+        """World source should include the full supported user-facing range up to the Local boundary."""
         plan = self.gen._build_export_plan(
             self.user_extent, 5, 10,
-            include_world_base_zooms=True, world_max_zoom=5
+            include_world_base_zooms=True, world_max_zoom=4
         )
         world_source = plan['sources'][0]
-        self.assertEqual(world_source['export_zooms'][-1], 5)
+        self.assertEqual(world_source['export_zooms'][-1], 4)
 
-    def test_region_source_zooms_match_user_range(self):
+    def test_local_source_zooms_match_user_range(self):
         plan = self.gen._build_export_plan(
             self.user_extent, 5, 10,
             include_world_base_zooms=True, world_max_zoom=3
         )
-        region_source = plan['sources'][1]
-        self.assertEqual(region_source['export_zooms'], list(range(5, 11)))
+        local_source = plan['sources'][1]
+        # Auto-fill lowers Local min_zoom from 5 to 4 to bridge World→Local gap
+        self.assertEqual(local_source['export_zooms'], list(range(4, 11)))
 
     def test_merged_tiles_by_zoom_preserves_order(self):
-        """World source tiles come first, then region source tiles."""
+        """World source tiles come first, then Local source tiles."""
         plan = self.gen._build_export_plan(
             self.user_extent, 5, 10,
             include_world_base_zooms=True, world_max_zoom=3
         )
-        # All world tiles should have source_index=0, region tiles source_index=1
-        world_tiles = [t for t in plan['tiles_by_zoom'] if t[6] == 0]
-        region_tiles = [t for t in plan['tiles_by_zoom'] if t[6] == 1]
-        # World tiles come first in the merged list
-        first_region_idx = next(
-            i for i, t in enumerate(plan['tiles_by_zoom']) if t[6] == 1
+        first_local_idx = next(
+            i for i, t in enumerate(plan['tiles_by_zoom']) if t[6] == 2
         )
-        last_world_idx = len(plan['tiles_by_zoom']) - len(region_tiles) - 1
-        # All entries before first_region_idx should be world (source_index=0)
-        for i in range(first_region_idx):
+        for i in range(first_local_idx):
             self.assertEqual(plan['tiles_by_zoom'][i][6], 0)
+        for i in range(first_local_idx, len(plan['tiles_by_zoom'])):
+            self.assertEqual(plan['tiles_by_zoom'][i][6], 2)
 
     def test_total_tiles_is_sum_across_sources(self):
         plan = self.gen._build_export_plan(
@@ -3783,20 +4587,20 @@ class TestMultiSourceExportPlan(unittest.TestCase):
             expected_pct = (plan['world_coverage_tiles'] / plan['world_tiles']) * 100
             self.assertAlmostEqual(plan['world_pct'], expected_pct, places=5)
 
-    def test_world_disabled_backward_compat(self):
-        """When world disabled, plan should look like current single-source."""
+    def test_world_disabled_preserves_legacy_single_source_contract(self):
+        """When world is disabled, local-only exports should use the legacy single-source slot."""
         plan = self.gen._build_export_plan(
             self.user_extent, 5, 10,
             include_world_base_zooms=False
         )
         self.assertEqual(len(plan['sources']), 1)
         self.assertEqual(plan['sources'][0]['source_id'], 'mbtiles-source')
+        self.assertEqual(plan['sources'][0]['source_index'], 0)
         self.assertEqual(plan['world_coverage_tiles'], plan['total_tiles'])
-        # tiles_by_zoom should all have source_index=0
         for t in plan['tiles_by_zoom']:
             self.assertEqual(t[6], 0)
-        # No source_index=1 entries
         self.assertFalse(any(t[6] == 1 for t in plan['tiles_by_zoom']))
+        self.assertFalse(any(t[6] == 2 for t in plan['tiles_by_zoom']))
 
     def test_world_tiles_backward_compat_when_disabled(self):
         """world_tiles formula must also hold when world tiles are disabled."""
@@ -3818,39 +4622,40 @@ class TestMultiSourceExportPlan(unittest.TestCase):
             expected_pct = (plan['world_coverage_tiles'] / plan['world_tiles']) * 100
             self.assertAlmostEqual(plan['world_pct'], expected_pct, places=5)
 
-    def test_world_coverage_overlap_adds_region_only_tiles_without_double_counting(self):
-        """Overlap should include unique high-zoom region tiles without counting duplicated low zooms twice."""
+    def test_region_local_three_source_plan_uses_fixed_slots(self):
+        """Region-enabled exports should produce World/Region/Local fixed-slot ordering."""
         plan = self.gen._build_export_plan(
-            self.user_extent, 2, 5,
-            include_world_base_zooms=True, world_max_zoom=3
+            self.user_extent, 6, 7,
+            include_world_base_zooms=True,
+            world_max_zoom=3,
+            include_region=True,
+            region_extent=_FakeRectangle(-2, -2, 2, 2),
+            region_min_zoom=4,
+            region_max_zoom=5,
         )
-        unique_tiles = self._count_unique_tiles(plan)
+        self.assertEqual([source['source_id'] for source in plan['sources']], [
+            'world-overview', 'region-detail', 'local-detail'
+        ])
+        self.assertEqual([source['source_index'] for source in plan['sources']], [0, 1, 2])
 
-        self.assertEqual(plan['export_zooms'], [0, 1, 2, 3, 4, 5])
-        self.assertEqual(unique_tiles, 93)
-        self.assertEqual(plan['world_coverage_tiles'], unique_tiles)
-        self.assertGreater(plan['world_coverage_tiles'], plan['sources'][0]['total_tiles'])
-        self.assertLess(plan['world_coverage_tiles'], plan['total_tiles'])
-        self.assertEqual(plan['world_tiles'], 1365)
-        self.assertAlmostEqual(plan['world_pct'], (93 / 1365) * 100, places=5)
-
-    def test_world_coverage_gap_includes_region_only_tiles(self):
-        """A zoom gap should still count region-only high zoom tiles toward world coverage."""
+    def test_world_coverage_gap_includes_local_only_tiles(self):
+        """Local tiles at auto-filled gap zooms count toward world coverage."""
         plan = self.gen._build_export_plan(
             self.user_extent, 6, 7,
             include_world_base_zooms=True, world_max_zoom=3
         )
         unique_tiles = self._count_unique_tiles(plan)
 
-        self.assertEqual(plan['export_zooms'], [0, 1, 2, 3, 6, 7])
-        self.assertEqual(unique_tiles, 93)
+        # Auto-fill bridges World (0-3) and Local (6-7) by lowering Local to 4
+        self.assertEqual(plan['export_zooms'], [0, 1, 2, 3, 4, 5, 6, 7])
+        self.assertEqual(unique_tiles, 101)
         self.assertEqual(plan['world_coverage_tiles'], unique_tiles)
         self.assertEqual(plan['world_coverage_tiles'], plan['total_tiles'])
-        self.assertEqual(plan['world_tiles'], 20565)
-        self.assertAlmostEqual(plan['world_pct'], (93 / 20565) * 100, places=5)
+        self.assertEqual(plan['world_tiles'], 21845)
+        self.assertAlmostEqual(plan['world_pct'], (101 / 21845) * 100, places=5)
 
     def test_world_disabled_single_source_coverage_uses_total_tiles(self):
-        """Single-source exports must keep world coverage equal to the export total."""
+        """Local-only exports must keep world coverage equal to the export total."""
         plan = self.gen._build_export_plan(
             self.world_extent, 0, 3,
             include_world_base_zooms=False
@@ -3864,7 +4669,7 @@ class TestMultiSourceExportPlan(unittest.TestCase):
 
 
 class TestMultiSourceStyleJson(unittest.TestCase):
-    """Tests for _create_style_from_canvas with source_plans."""
+    """Tests for _create_style_from_canvas with fixed-slot source plans."""
 
     def setUp(self):
         self.gen = SMPGenerator()
@@ -3873,287 +4678,165 @@ class TestMultiSourceStyleJson(unittest.TestCase):
     def _make_extent(self):
         return _FakeRectangle(-1, -1, 1, 1)
 
-    def test_single_source_style_backward_compat(self):
-        """With source_plans=None, style should be single-source (backward compat)."""
+    def _world_plan(self):
+        return {
+            'source_id': 'world-overview',
+            'source_index': 0,
+            'source_bounds': [-180, -85.0511, 180, 85.0511],
+            'export_zooms': list(range(0, 4)),
+            'tiles_by_zoom': [],
+            'total_tiles': 85,
+            'source_name': 'World Overview',
+        }
+
+    def _region_plan(self):
+        return {
+            'source_id': 'region-detail',
+            'source_index': 1,
+            'source_bounds': [-10, -10, 10, 10],
+            'export_zooms': list(range(4, 6)),
+            'tiles_by_zoom': [],
+            'total_tiles': 24,
+            'source_name': 'Region Detail',
+        }
+
+    def _local_plan(self):
+        return {
+            'source_id': 'local-detail',
+            'source_index': 2,
+            'source_bounds': [-1, -1, 1, 1],
+            'export_zooms': list(range(6, 11)),
+            'tiles_by_zoom': [],
+            'total_tiles': 100,
+            'source_name': 'Local Detail',
+        }
+
+    def test_default_style_uses_legacy_single_source_contract(self):
+        """Default style generation should preserve the legacy single-source contract."""
         style = self.gen._create_style_from_canvas(
             self._make_extent(), 5, 10, 'PNG'
         )
-        self.assertEqual(len(style['sources']), 1)
-        source_id = list(style['sources'].keys())[0]
-        self.assertEqual(source_id, 'mbtiles-source')
-
-    def test_single_source_style_with_one_plan(self):
-        """With source_plans having 1 entry, style should be single-source."""
-        source_plans = [{
-            'source_id': 'mbtiles-source',
-            'source_index': 0,
-            'source_bounds': [-1, -1, 1, 1],
-            'export_zooms': list(range(5, 11)),
-            'tiles_by_zoom': [],
-            'total_tiles': 0
-        }]
-        style = self.gen._create_style_from_canvas(
-            self._make_extent(), 5, 10, 'PNG',
-            source_plans=source_plans
-        )
-        self.assertEqual(len(style['sources']), 1)
-        self.assertIn('mbtiles-source', style['sources'])
+        self.assertEqual(list(style['sources'].keys()), ['mbtiles-source'])
         self.assertEqual(style['metadata']['smp:sourceFolders']['mbtiles-source'], 's/0')
+        self.assertIn('s/0/', style['sources']['mbtiles-source']['tiles'][0])
+        raster_layers = [l for l in style['layers'] if l['type'] == 'raster']
+        self.assertEqual([layer['id'] for layer in raster_layers], ['raster'])
 
-    def test_two_source_style_has_two_sources(self):
-        """With 2 source plans, style should have two sources."""
-        source_plans = [
-            {
-                'source_id': 'world-overview',
-                'source_index': 0,
-                'source_bounds': [-180, -85.0511, 180, 85.0511],
-                'export_zooms': list(range(0, 4)),
-                'tiles_by_zoom': [],
-                'total_tiles': 85
-            },
-            {
-                'source_id': 'region-detail',
-                'source_index': 1,
-                'source_bounds': [-1, -1, 1, 1],
-                'export_zooms': list(range(5, 11)),
-                'tiles_by_zoom': [],
-                'total_tiles': 100
-            }
-        ]
+    def test_local_only_style_with_one_plan(self):
+        """Single-source exports must still use the Local fixed slot metadata."""
         style = self.gen._create_style_from_canvas(
             self._make_extent(), 5, 10, 'PNG',
-            source_plans=source_plans
+            source_plans=[self._local_plan()]
         )
-        self.assertEqual(len(style['sources']), 2)
-        self.assertIn('world-overview', style['sources'])
-        self.assertIn('region-detail', style['sources'])
+        self.assertEqual(len(style['sources']), 1)
+        self.assertIn('local-detail', style['sources'])
+        self.assertEqual(style['metadata']['smp:sourceFolders']['local-detail'], 's/2')
 
-    def test_two_source_style_has_two_raster_layers(self):
-        """Multi-source style should have background + world-raster + region-raster layers."""
-        source_plans = [
-            {
-                'source_id': 'world-overview',
-                'source_index': 0,
-                'source_bounds': [-180, -85.0511, 180, 85.0511],
-                'export_zooms': list(range(0, 4)),
-                'tiles_by_zoom': [],
-                'total_tiles': 85
-            },
-            {
-                'source_id': 'region-detail',
-                'source_index': 1,
-                'source_bounds': [-1, -1, 1, 1],
-                'export_zooms': list(range(5, 11)),
-                'tiles_by_zoom': [],
-                'total_tiles': 100
-            }
-        ]
+    def test_world_local_style_has_two_sources(self):
+        """World + Local exports should expose exactly those two fixed slots."""
         style = self.gen._create_style_from_canvas(
-            self._make_extent(), 5, 10, 'PNG',
-            source_plans=source_plans
+            self._make_extent(), 6, 10, 'PNG',
+            source_plans=[self._world_plan(), self._local_plan()]
+        )
+        self.assertEqual(list(style['sources'].keys()), ['world-overview', 'local-detail'])
+
+    def test_world_local_style_has_two_raster_layers(self):
+        """World + Local exports should stack world below local."""
+        style = self.gen._create_style_from_canvas(
+            self._make_extent(), 6, 10, 'PNG',
+            source_plans=[self._world_plan(), self._local_plan()]
         )
         raster_layers = [l for l in style['layers'] if l['type'] == 'raster']
-        self.assertEqual(len(raster_layers), 2)
-        source_refs = {l['source'] for l in raster_layers}
-        self.assertEqual(source_refs, {'world-overview', 'region-detail'})
+        self.assertEqual([layer['id'] for layer in raster_layers], ['world-raster', 'local-raster'])
+        self.assertEqual([layer['source'] for layer in raster_layers], ['world-overview', 'local-detail'])
 
-    def test_two_source_style_has_two_source_folders(self):
-        """smp:sourceFolders should have entries for both sources."""
-        source_plans = [
-            {
-                'source_id': 'world-overview',
-                'source_index': 0,
-                'source_bounds': [-180, -85.0511, 180, 85.0511],
-                'export_zooms': list(range(0, 4)),
-                'tiles_by_zoom': [],
-                'total_tiles': 85
-            },
-            {
-                'source_id': 'region-detail',
-                'source_index': 1,
-                'source_bounds': [-1, -1, 1, 1],
-                'export_zooms': list(range(5, 11)),
-                'tiles_by_zoom': [],
-                'total_tiles': 100
-            }
-        ]
+    def test_three_source_style_has_fixed_source_folders(self):
+        """Fixed slot styles must preserve sparse World/Region/Local folder mapping."""
         style = self.gen._create_style_from_canvas(
-            self._make_extent(), 5, 10, 'PNG',
-            source_plans=source_plans
+            self._make_extent(), 6, 10, 'PNG',
+            source_plans=[self._world_plan(), self._region_plan(), self._local_plan()]
         )
         folders = style['metadata']['smp:sourceFolders']
         self.assertEqual(folders['world-overview'], 's/0')
         self.assertEqual(folders['region-detail'], 's/1')
+        self.assertEqual(folders['local-detail'], 's/2')
 
-    def test_two_source_world_overview_bounds(self):
-        """World overview source should have full-world bounds."""
-        source_plans = [
-            {
-                'source_id': 'world-overview',
-                'source_index': 0,
-                'source_bounds': [-180, -85.0511, 180, 85.0511],
-                'export_zooms': list(range(0, 4)),
-                'tiles_by_zoom': [],
-                'total_tiles': 85
-            },
-            {
-                'source_id': 'region-detail',
-                'source_index': 1,
-                'source_bounds': [-1, -1, 1, 1],
-                'export_zooms': list(range(5, 11)),
-                'tiles_by_zoom': [],
-                'total_tiles': 100
-            }
-        ]
+    def test_three_source_style_has_ordered_raster_layers(self):
+        """Three-source styles must preserve World → Region → Local paint order."""
         style = self.gen._create_style_from_canvas(
-            self._make_extent(), 5, 10, 'PNG',
-            source_plans=source_plans
+            self._make_extent(), 6, 10, 'PNG',
+            source_plans=[self._world_plan(), self._region_plan(), self._local_plan()]
+        )
+        raster_layers = [l for l in style['layers'] if l['type'] == 'raster']
+        self.assertEqual(
+            [layer['id'] for layer in raster_layers],
+            ['world-raster', 'region-raster', 'local-raster']
+        )
+
+    def test_world_overview_bounds(self):
+        """World overview source should keep full-world bounds."""
+        style = self.gen._create_style_from_canvas(
+            self._make_extent(), 6, 10, 'PNG',
+            source_plans=[self._world_plan(), self._local_plan()]
         )
         world_src = style['sources']['world-overview']
         self.assertEqual(world_src['bounds'], [-180, -85.0511, 180, 85.0511])
         self.assertEqual(world_src['minzoom'], 0)
         self.assertEqual(world_src['maxzoom'], 3)
 
-    def test_two_source_region_detail_bounds(self):
-        """Region detail source should have user extent bounds."""
-        source_plans = [
-            {
-                'source_id': 'world-overview',
-                'source_index': 0,
-                'source_bounds': [-180, -85.0511, 180, 85.0511],
-                'export_zooms': list(range(0, 4)),
-                'tiles_by_zoom': [],
-                'total_tiles': 85
-            },
-            {
-                'source_id': 'region-detail',
-                'source_index': 1,
-                'source_bounds': [-1, -1, 1, 1],
-                'export_zooms': list(range(5, 11)),
-                'tiles_by_zoom': [],
-                'total_tiles': 100
-            }
-        ]
+    def test_region_detail_bounds(self):
+        """Region detail source should use its configured extent and zooms."""
         style = self.gen._create_style_from_canvas(
-            self._make_extent(), 5, 10, 'PNG',
-            source_plans=source_plans
+            self._make_extent(), 6, 10, 'PNG',
+            source_plans=[self._world_plan(), self._region_plan(), self._local_plan()]
         )
         region_src = style['sources']['region-detail']
-        self.assertEqual(region_src['bounds'], [-1, -1, 1, 1])
-        self.assertEqual(region_src['minzoom'], 5)
-        self.assertEqual(region_src['maxzoom'], 10)
+        self.assertEqual(region_src['bounds'], [-10, -10, 10, 10])
+        self.assertEqual(region_src['minzoom'], 4)
+        self.assertEqual(region_src['maxzoom'], 5)
 
-    def test_smp_bounds_uses_region_not_world(self):
-        """smp:bounds must use region-detail bounds (highest maxzoom source)."""
-        source_plans = [
-            {
-                'source_id': 'world-overview',
-                'source_index': 0,
-                'source_bounds': [-180, -85.0511, 180, 85.0511],
-                'export_zooms': list(range(0, 4)),
-                'tiles_by_zoom': [],
-                'total_tiles': 85
-            },
-            {
-                'source_id': 'region-detail',
-                'source_index': 1,
-                'source_bounds': [-1, -1, 1, 1],
-                'export_zooms': list(range(5, 11)),
-                'tiles_by_zoom': [],
-                'total_tiles': 100
-            }
-        ]
+    def test_smp_bounds_uses_local(self):
+        """Root SMP metadata must always follow the Local source."""
+        local_plan = self._local_plan()
+        local_plan['source_bounds'] = [-2, -3, 8, 9]
         style = self.gen._create_style_from_canvas(
-            self._make_extent(), 5, 10, 'PNG',
-            source_plans=source_plans
+            self._make_extent(), 6, 10, 'PNG',
+            source_plans=[self._world_plan(), self._region_plan(), local_plan]
         )
-        self.assertEqual(style['metadata']['smp:bounds'], [-1, -1, 1, 1])
+        self.assertEqual(style['metadata']['smp:bounds'], [-2, -3, 8, 9])
         self.assertEqual(style['metadata']['smp:maxzoom'], 10)
 
-    def test_source_tiles_url_includes_source_index(self):
-        """World tiles URL should use s/0/, region tiles URL should use s/1/."""
-        source_plans = [
-            {
-                'source_id': 'world-overview',
-                'source_index': 0,
-                'source_bounds': [-180, -85.0511, 180, 85.0511],
-                'export_zooms': list(range(0, 4)),
-                'tiles_by_zoom': [],
-                'total_tiles': 85
-            },
-            {
-                'source_id': 'region-detail',
-                'source_index': 1,
-                'source_bounds': [-1, -1, 1, 1],
-                'export_zooms': list(range(5, 11)),
-                'tiles_by_zoom': [],
-                'total_tiles': 100
-            }
-        ]
+    def test_source_tiles_url_includes_sparse_source_index(self):
+        """World and Local tile URLs should preserve their stable folder indices."""
         style = self.gen._create_style_from_canvas(
-            self._make_extent(), 5, 10, 'PNG',
-            source_plans=source_plans
+            self._make_extent(), 6, 10, 'PNG',
+            source_plans=[self._world_plan(), self._local_plan()]
         )
         world_tiles_url = style['sources']['world-overview']['tiles'][0]
-        region_tiles_url = style['sources']['region-detail']['tiles'][0]
+        local_tiles_url = style['sources']['local-detail']['tiles'][0]
         self.assertIn('s/0/', world_tiles_url)
-        self.assertIn('s/1/', region_tiles_url)
+        self.assertIn('s/2/', local_tiles_url)
 
     def test_sources_have_format_name_version(self):
         """Each source should have format, name, and version properties."""
-        source_plans = [
-            {
-                'source_id': 'world-overview',
-                'source_index': 0,
-                'source_bounds': [-180, -85.0511, 180, 85.0511],
-                'export_zooms': list(range(0, 4)),
-                'tiles_by_zoom': [],
-                'total_tiles': 85
-            },
-            {
-                'source_id': 'region-detail',
-                'source_index': 1,
-                'source_bounds': [-1, -1, 1, 1],
-                'export_zooms': list(range(5, 11)),
-                'tiles_by_zoom': [],
-                'total_tiles': 100
-            }
-        ]
         style = self.gen._create_style_from_canvas(
-            self._make_extent(), 5, 10, 'PNG',
-            source_plans=source_plans
+            self._make_extent(), 6, 10, 'PNG',
+            source_plans=[self._world_plan(), self._region_plan(), self._local_plan()]
         )
-        for src_id, src in style['sources'].items():
+        for _src_id, src in style['sources'].items():
             self.assertIn('format', src)
             self.assertIn('name', src)
             self.assertIn('version', src)
             self.assertEqual(src['version'], '2.0')
 
-    def test_center_derived_from_region_bounds(self):
-        """Root center should be derived from region-detail bounds."""
-        source_plans = [
-            {
-                'source_id': 'world-overview',
-                'source_index': 0,
-                'source_bounds': [-180, -85.0511, 180, 85.0511],
-                'export_zooms': list(range(0, 4)),
-                'tiles_by_zoom': [],
-                'total_tiles': 85
-            },
-            {
-                'source_id': 'region-detail',
-                'source_index': 1,
-                'source_bounds': [-10, -20, 30, 40],
-                'export_zooms': list(range(5, 11)),
-                'tiles_by_zoom': [],
-                'total_tiles': 100
-            }
-        ]
+    def test_center_derived_from_local_bounds(self):
+        """Root center should be derived from the Local source bounds."""
+        local_plan = self._local_plan()
+        local_plan['source_bounds'] = [-10, -20, 30, 40]
         style = self.gen._create_style_from_canvas(
-            self._make_extent(), 5, 10, 'PNG',
-            source_plans=source_plans
+            self._make_extent(), 6, 10, 'PNG',
+            source_plans=[self._world_plan(), self._region_plan(), local_plan]
         )
-        # Center should be midpoint of region bounds
         self.assertAlmostEqual(style['center'][0], (-10 + 30) / 2)
         self.assertAlmostEqual(style['center'][1], (-20 + 40) / 2)
 
@@ -4161,50 +4844,50 @@ class TestMultiSourceStyleJson(unittest.TestCase):
 class TestTilePathsFromSourcePlans(unittest.TestCase):
     """Tests for _tile_paths_from_source_plans static method."""
 
-    def test_single_source_produces_zero_prefixed_paths(self):
-        """Single source (source_index=0) should produce paths like 0/{z}/{x}/{y}.png."""
+    def test_local_only_source_produces_legacy_single_source_paths(self):
+        """Local-only exports should use the legacy single-source path prefix."""
         source_plans = [{
-            'tiles_by_zoom': [(0, 0, 0, 0, 0, 1, 0)],
+            'tiles_by_zoom': [(6, 0, 0, 0, 0, 1, 0)],
             'source_index': 0
         }]
         paths = SMPGenerator._tile_paths_from_source_plans(source_plans, 'PNG')
-        self.assertIn('0/0/0/0.png', paths)
+        self.assertIn('0/6/0/0.png', paths)
 
-    def test_two_sources_produce_separate_paths(self):
-        """Two sources should produce paths with different source_index prefixes."""
+    def test_world_and_local_sources_produce_sparse_paths(self):
+        """World + Local exports should preserve sparse fixed-slot prefixes."""
         source_plans = [
             {'tiles_by_zoom': [(0, 0, 0, 0, 0, 1, 0)], 'source_index': 0},
-            {'tiles_by_zoom': [(5, 3, 3, 7, 7, 1, 1)], 'source_index': 1}
+            {'tiles_by_zoom': [(6, 3, 3, 7, 7, 1, 2)], 'source_index': 2}
         ]
         paths = SMPGenerator._tile_paths_from_source_plans(source_plans, 'PNG')
         self.assertIn('0/0/0/0.png', paths)
-        self.assertIn('1/5/3/7.png', paths)
+        self.assertIn('2/6/3/7.png', paths)
 
     def test_webp_extension(self):
         """Should use .webp extension for WEBP format."""
         source_plans = [
-            {'tiles_by_zoom': [(0, 0, 0, 0, 0, 1, 0)], 'source_index': 0}
+            {'tiles_by_zoom': [(6, 0, 0, 0, 0, 1, 2)], 'source_index': 2}
         ]
         paths = SMPGenerator._tile_paths_from_source_plans(source_plans, 'WEBP')
-        self.assertIn('0/0/0/0.webp', paths)
+        self.assertIn('2/6/0/0.webp', paths)
         self.assertNotIn('.png', str(paths))
 
     def test_multi_range_tiles(self):
         """Should handle tiles_by_zoom with multiple ranges per zoom (antimeridian)."""
         source_plans = [{
             'tiles_by_zoom': [
-                (4, 15, 15, 5, 5, 1, 0),  # first range
-                (4, 0, 0, 5, 5, 1, 0),    # second range (antimeridian)
+                (4, 15, 15, 5, 5, 1, 2),
+                (4, 0, 0, 5, 5, 1, 2),
             ],
-            'source_index': 0
+            'source_index': 2
         }]
         paths = SMPGenerator._tile_paths_from_source_plans(source_plans, 'PNG')
-        self.assertIn('0/4/15/5.png', paths)
-        self.assertIn('0/4/0/5.png', paths)
+        self.assertIn('2/4/15/5.png', paths)
+        self.assertIn('2/4/0/5.png', paths)
 
 
 class TestArchivePathsMultiSource(unittest.TestCase):
-    """Archive paths must use s/ prefix directly (not s/0/) since source_index is in tile path."""
+    """Archive paths must preserve the fixed World/Region/Local slot folders."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -4212,8 +4895,8 @@ class TestArchivePathsMultiSource(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_single_source_tiles_under_s_0(self):
-        """Single source tiles should be archived under s/0/{z}/{x}/{y}."""
+    def test_local_only_tiles_under_s_0(self):
+        """Local-only tiles should be archived under s/0/{z}/{x}/{y}."""
         gen = SMPGenerator()
         import json
         style_path = os.path.join(self.tmp, 'style.json')
@@ -4221,8 +4904,7 @@ class TestArchivePathsMultiSource(unittest.TestCase):
             json.dump({"version": 8, "sources": {}, "layers": []}, f)
 
         tiles_dir = os.path.join(self.tmp, 'tiles')
-        # Tiles at source_index 0 path
-        tile_file_dir = os.path.join(tiles_dir, '0', '0', '0')
+        tile_file_dir = os.path.join(tiles_dir, '0', '6', '0')
         os.makedirs(tile_file_dir, exist_ok=True)
         with open(os.path.join(tile_file_dir, '0.png'), 'wb') as f:
             f.write(b'\x89PNG\r\n\x1a\n')
@@ -4237,10 +4919,10 @@ class TestArchivePathsMultiSource(unittest.TestCase):
         import zipfile
         with zipfile.ZipFile(out_path) as zf:
             names = zf.namelist()
-        self.assertIn('s/0/0/0/0.png', names)
+        self.assertIn('s/0/6/0/0.png', names)
 
-    def test_two_source_tiles_under_s_0_and_s_1(self):
-        """Two sources should have tiles under s/0/ and s/1/."""
+    def test_three_source_tiles_under_s_0_s_1_and_s_2(self):
+        """Three-source exports should preserve all three fixed-slot directories."""
         gen = SMPGenerator()
         import json
         style_path = os.path.join(self.tmp, 'style.json')
@@ -4248,16 +4930,11 @@ class TestArchivePathsMultiSource(unittest.TestCase):
             json.dump({"version": 8, "sources": {}, "layers": []}, f)
 
         tiles_dir = os.path.join(self.tmp, 'tiles')
-        # Source 0 tile
-        s0_dir = os.path.join(tiles_dir, '0', '0', '0')
-        os.makedirs(s0_dir, exist_ok=True)
-        with open(os.path.join(s0_dir, '0.png'), 'wb') as f:
-            f.write(b'\x89PNG\r\n\x1a\n')
-        # Source 1 tile
-        s1_dir = os.path.join(tiles_dir, '1', '5', '3')
-        os.makedirs(s1_dir, exist_ok=True)
-        with open(os.path.join(s1_dir, '7.png'), 'wb') as f:
-            f.write(b'\x89PNG\r\n\x1a\n')
+        for source_index, zoom, x, y in [(0, 0, 0, 0), (1, 4, 3, 3), (2, 6, 8, 8)]:
+            source_dir = os.path.join(tiles_dir, str(source_index), str(zoom), str(x))
+            os.makedirs(source_dir, exist_ok=True)
+            with open(os.path.join(source_dir, f'{y}.png'), 'wb') as f:
+                f.write(b'\x89PNG\r\n\x1a\n')
 
         out_path = os.path.join(self.tmp, 'output.smp')
         gen._build_smp_archive(
@@ -4270,7 +4947,8 @@ class TestArchivePathsMultiSource(unittest.TestCase):
         with zipfile.ZipFile(out_path) as zf:
             names = zf.namelist()
         self.assertIn('s/0/0/0/0.png', names)
-        self.assertIn('s/1/5/3/7.png', names)
+        self.assertIn('s/1/4/3/3.png', names)
+        self.assertIn('s/2/6/8/8.png', names)
 
 
 class TestTileCacheSourceIndex(unittest.TestCase):
@@ -4492,7 +5170,7 @@ class TestGenerateTilesWithSourceIndex(unittest.TestCase):
 
 
 class TestZoomGapCase(unittest.TestCase):
-    """When min_zoom > max(2, world_max_zoom), sources have disjoint zoom ranges."""
+    """When min_zoom > world_max_zoom, World and Local have a valid zoom gap."""
 
     def setUp(self):
         self.gen = SMPGenerator()
@@ -4504,18 +5182,17 @@ class TestZoomGapCase(unittest.TestCase):
         self.gen.get_world_extent = lambda: self.world_extent
 
     def test_disjoint_zoom_ranges(self):
-        """When min_zoom > world_max_zoom, world and region zooms should not overlap."""
+        """When Local starts above World, their zoom ranges should not overlap."""
         plan = self.gen._build_export_plan(
             self.user_extent, 8, 10,
             include_world_base_zooms=True, world_max_zoom=3
         )
         world_zooms = plan['sources'][0]['export_zooms']
-        region_zooms = plan['sources'][1]['export_zooms']
-        # No overlap between world and region zoom ranges
-        self.assertEqual(set(world_zooms) & set(region_zooms), set())
+        local_zooms = plan['sources'][1]['export_zooms']
+        self.assertEqual(set(world_zooms) & set(local_zooms), set())
 
     def test_both_sources_generate_tiles(self):
-        """Both sources should produce tiles even with zoom gap."""
+        """Both World and Local sources should produce tiles even with a gap."""
         plan = self.gen._build_export_plan(
             self.user_extent, 8, 10,
             include_world_base_zooms=True, world_max_zoom=3
@@ -4533,8 +5210,23 @@ class TestSMPRoundtripMultiSource(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_multi_source_archive_contains_both_source_trees(self):
-        """Archive should contain s/0/ and s/1/ tile trees."""
+    def _three_source_plan(self, gen):
+        gen._get_bounds_wgs84 = lambda ext: [
+            ext.xMinimum(), ext.yMinimum(), ext.xMaximum(), ext.yMaximum()
+        ]
+        gen.get_world_extent = lambda: _FakeRectangle(-180, -85.0511, 180, 85.0511)
+        return gen._build_export_plan(
+            _FakeRectangle(-1, -1, 1, 1), 6, 7,
+            include_world_base_zooms=True,
+            world_max_zoom=3,
+            include_region=True,
+            region_extent=_FakeRectangle(-2, -2, 2, 2),
+            region_min_zoom=4,
+            region_max_zoom=5
+        )
+
+    def test_multi_source_archive_contains_all_source_trees(self):
+        """Archive should contain s/0/, s/1/, and s/2/ tile trees."""
         gen = SMPGenerator()
         import json
 
@@ -4546,35 +5238,45 @@ class TestSMPRoundtripMultiSource(unittest.TestCase):
                     "type": "raster",
                     "format": "png",
                     "minzoom": 0,
-                    "maxzoom": 2,
+                    "maxzoom": 3,
                     "bounds": [-180, -85.0511, 180, 85.0511],
                     "tiles": ["smp://maps.v1/s/0/{z}/{x}/{y}.png"]
                 },
                 "region-detail": {
                     "type": "raster",
                     "format": "png",
-                    "minzoom": 5,
-                    "maxzoom": 10,
-                    "bounds": [-1, -1, 1, 1],
+                    "minzoom": 4,
+                    "maxzoom": 5,
+                    "bounds": [-2, -2, 2, 2],
                     "tiles": ["smp://maps.v1/s/1/{z}/{x}/{y}.png"]
+                },
+                "local-detail": {
+                    "type": "raster",
+                    "format": "png",
+                    "minzoom": 6,
+                    "maxzoom": 7,
+                    "bounds": [-1, -1, 1, 1],
+                    "tiles": ["smp://maps.v1/s/2/{z}/{x}/{y}.png"]
                 }
             },
             "layers": [
                 {"id": "background", "type": "background",
                  "paint": {"background-color": "white"}},
                 {"id": "world-raster", "type": "raster", "source": "world-overview"},
-                {"id": "region-raster", "type": "raster", "source": "region-detail"}
+                {"id": "region-raster", "type": "raster", "source": "region-detail"},
+                {"id": "local-raster", "type": "raster", "source": "local-detail"}
             ],
             "metadata": {
                 "smp:bounds": [-1, -1, 1, 1],
-                "smp:maxzoom": 10,
+                "smp:maxzoom": 7,
                 "smp:sourceFolders": {
                     "world-overview": "s/0",
-                    "region-detail": "s/1"
+                    "region-detail": "s/1",
+                    "local-detail": "s/2"
                 }
             },
             "center": [0, 0],
-            "zoom": 5
+            "zoom": 6
         }
 
         style_path = os.path.join(self.tmp, 'style.json')
@@ -4582,21 +5284,10 @@ class TestSMPRoundtripMultiSource(unittest.TestCase):
             json.dump(style, f)
 
         tiles_dir = os.path.join(self.tmp, 'tiles')
-        # World source tiles (source 0)
-        for z in range(0, 3):
-            n = 1 << z
-            for x in range(n):
-                for y in range(n):
-                    d = os.path.join(tiles_dir, '0', str(z), str(x))
-                    os.makedirs(d, exist_ok=True)
-                    with open(os.path.join(d, f'{y}.png'), 'wb') as f:
-                        f.write(b'\x89PNG\r\n\x1a\n')
-
-        # Region source tiles (source 1)
-        for z in [5]:
-            d = os.path.join(tiles_dir, '1', str(z), '16')
-            os.makedirs(d, exist_ok=True)
-            with open(os.path.join(d, '16.png'), 'wb') as f:
+        for source_index, zoom, x, y in [(0, 0, 0, 0), (1, 4, 8, 8), (2, 6, 32, 32)]:
+            tile_dir = os.path.join(tiles_dir, str(source_index), str(zoom), str(x))
+            os.makedirs(tile_dir, exist_ok=True)
+            with open(os.path.join(tile_dir, f'{y}.png'), 'wb') as f:
                 f.write(b'\x89PNG\r\n\x1a\n')
 
         out_path = os.path.join(self.tmp, 'multi.smp')
@@ -4611,42 +5302,33 @@ class TestSMPRoundtripMultiSource(unittest.TestCase):
             names = set(zf.namelist())
             style_data = json.loads(zf.read('style.json'))
 
-        # Both source trees present
         s0_tiles = {n for n in names if n.startswith('s/0/')}
         s1_tiles = {n for n in names if n.startswith('s/1/')}
+        s2_tiles = {n for n in names if n.startswith('s/2/')}
         self.assertGreater(len(s0_tiles), 0, "No tiles under s/0/")
         self.assertGreater(len(s1_tiles), 0, "No tiles under s/1/")
+        self.assertGreater(len(s2_tiles), 0, "No tiles under s/2/")
 
-        # style.json has both sources
         self.assertIn('world-overview', style_data['sources'])
         self.assertIn('region-detail', style_data['sources'])
+        self.assertIn('local-detail', style_data['sources'])
 
-        # sourceFolders map to directories that exist
         for src_id, folder in style_data['metadata']['smp:sourceFolders'].items():
             matching = [n for n in names if n.startswith(folder + '/')]
             self.assertGreater(len(matching), 0,
                                f"No entries under {folder} for source {src_id}")
 
     def test_tile_counts_match_source_plans(self):
-        """Tile counts under s/0/ and s/1/ should match source plan totals."""
+        """Tile counts under s/0/, s/1/, and s/2/ should match source plan totals."""
         gen = SMPGenerator()
         import json, zipfile
 
-        # Build a real export plan to get accurate tile counts
-        gen._get_bounds_wgs84 = lambda ext: [
-            ext.xMinimum(), ext.yMinimum(), ext.xMaximum(), ext.yMaximum()
-        ]
-        plan = gen._build_export_plan(
-            _FakeRectangle(-1, -1, 1, 1), 0, 2,
-            include_world_base_zooms=True, world_max_zoom=3
-        )
-
+        plan = self._three_source_plan(gen)
         world_plan = plan['sources'][0]
         region_plan = plan['sources'][1]
+        local_plan = plan['sources'][2]
 
         tiles_dir = os.path.join(self.tmp, 'tiles')
-
-        # Create tiles for both sources
         for sp in plan['sources']:
             for zoom, min_x, max_x, min_y, max_y, _, si in sp['tiles_by_zoom']:
                 for x in range(min_x, max_x + 1):
@@ -4667,27 +5349,35 @@ class TestSMPRoundtripMultiSource(unittest.TestCase):
                 },
                 "region-detail": {
                     "type": "raster", "format": "png",
-                    "minzoom": 0, "maxzoom": 2,
-                    "bounds": [-1, -1, 1, 1],
+                    "minzoom": 4, "maxzoom": 5,
+                    "bounds": [-2, -2, 2, 2],
                     "tiles": ["smp://maps.v1/s/1/{z}/{x}/{y}.png"]
+                },
+                "local-detail": {
+                    "type": "raster", "format": "png",
+                    "minzoom": 6, "maxzoom": 7,
+                    "bounds": [-1, -1, 1, 1],
+                    "tiles": ["smp://maps.v1/s/2/{z}/{x}/{y}.png"]
                 }
             },
             "layers": [
                 {"id": "background", "type": "background",
                  "paint": {"background-color": "white"}},
                 {"id": "world-raster", "type": "raster", "source": "world-overview"},
-                {"id": "region-raster", "type": "raster", "source": "region-detail"}
+                {"id": "region-raster", "type": "raster", "source": "region-detail"},
+                {"id": "local-raster", "type": "raster", "source": "local-detail"}
             ],
             "metadata": {
                 "smp:bounds": [-1, -1, 1, 1],
-                "smp:maxzoom": 2,
+                "smp:maxzoom": 7,
                 "smp:sourceFolders": {
                     "world-overview": "s/0",
-                    "region-detail": "s/1"
+                    "region-detail": "s/1",
+                    "local-detail": "s/2"
                 }
             },
             "center": [0, 0],
-            "zoom": 5
+            "zoom": 6
         }
 
         style_path = os.path.join(self.tmp, 'style_plan.json')
@@ -4706,11 +5396,88 @@ class TestSMPRoundtripMultiSource(unittest.TestCase):
 
         s0_count = len([n for n in names if n.startswith('s/0/') and n.endswith('.png')])
         s1_count = len([n for n in names if n.startswith('s/1/') and n.endswith('.png')])
+        s2_count = len([n for n in names if n.startswith('s/2/') and n.endswith('.png')])
 
-        self.assertEqual(s0_count, world_plan['total_tiles'],
-                         f"s/0/ tile count {s0_count} != world plan total {world_plan['total_tiles']}")
-        self.assertEqual(s1_count, region_plan['total_tiles'],
-                         f"s/1/ tile count {s1_count} != region plan total {region_plan['total_tiles']}")
+        self.assertEqual(s0_count, world_plan['total_tiles'])
+        self.assertEqual(s1_count, region_plan['total_tiles'])
+        self.assertEqual(s2_count, local_plan['total_tiles'])
+
+    def test_world_disabled_with_region_produces_sparse_indices(self):
+        """World disabled + Region enabled must yield sources at indices {1, 2} only.
+
+        Verifies the sparse fixed-slot contract end-to-end: plan, style, and
+        archive must reflect ``s/1`` and ``s/2`` while never producing ``s/0``.
+        """
+        gen = SMPGenerator()
+        gen._get_bounds_wgs84 = lambda ext: [
+            ext.xMinimum(), ext.yMinimum(), ext.xMaximum(), ext.yMaximum()
+        ]
+        gen.get_world_extent = lambda: _FakeRectangle(-180, -85.0511, 180, 85.0511)
+
+        local_extent = _FakeRectangle(-1, -1, 1, 1)
+        region_extent = _FakeRectangle(-2, -2, 2, 2)
+
+        plan = gen._build_export_plan(
+            local_extent, 7, 9,
+            include_world_base_zooms=False,
+            include_region=True,
+            region_extent=region_extent,
+            region_min_zoom=4,
+            region_max_zoom=6,
+        )
+
+        # Sparse indices: no slot 0, region=1, local=2.
+        self.assertEqual(
+            [s['source_index'] for s in plan['sources']], [1, 2]
+        )
+        self.assertEqual(
+            [s['source_id'] for s in plan['sources']],
+            ['region-detail', 'local-detail'],
+        )
+
+        # Style should map only s/1 and s/2; never s/0 when world is disabled.
+        style = gen._create_style_from_canvas(
+            local_extent, 7, 9, 'PNG',
+            source_plans=plan['sources'],
+        )
+        folders = style['metadata']['smp:sourceFolders']
+        self.assertEqual(folders.get('region-detail'), 's/1')
+        self.assertEqual(folders.get('local-detail'), 's/2')
+        self.assertNotIn('world-overview', folders)
+        for folder in folders.values():
+            self.assertNotEqual(folder, 's/0')
+
+        # Archive contents must mirror the sparse layout.
+        import json
+        import zipfile
+
+        style_path = os.path.join(self.tmp, 'style_sparse.json')
+        with open(style_path, 'w') as f:
+            json.dump(style, f)
+
+        tiles_dir = os.path.join(self.tmp, 'tiles_sparse')
+        for source_index, zoom, x, y in [(1, 4, 8, 8), (2, 7, 64, 64)]:
+            tile_dir = os.path.join(tiles_dir, str(source_index), str(zoom), str(x))
+            os.makedirs(tile_dir, exist_ok=True)
+            with open(os.path.join(tile_dir, f'{y}.png'), 'wb') as f:
+                f.write(b'\x89PNG\r\n\x1a\n')
+
+        out_path = os.path.join(self.tmp, 'sparse.smp')
+        gen._build_smp_archive(
+            style_path=style_path,
+            tiles_dir=tiles_dir,
+            output_path=out_path,
+        )
+
+        with zipfile.ZipFile(out_path) as zf:
+            names = set(zf.namelist())
+
+        s0_tiles = {n for n in names if n.startswith('s/0/')}
+        s1_tiles = {n for n in names if n.startswith('s/1/')}
+        s2_tiles = {n for n in names if n.startswith('s/2/')}
+        self.assertEqual(s0_tiles, set(), 'No s/0/ entries expected when World is disabled')
+        self.assertGreater(len(s1_tiles), 0, 'Region tiles missing under s/1/')
+        self.assertGreater(len(s2_tiles), 0, 'Local tiles missing under s/2/')
 
 
 class TestDedupWithOverlappingZooms(unittest.TestCase):
@@ -4759,8 +5526,8 @@ class TestDedupWithOverlappingZooms(unittest.TestCase):
         self.assertIn('s/1/0/0/0.png', names)
 
 
-class TestWorldBackwardCompatDisabled(unittest.TestCase):
-    """When world tiles disabled, output must be identical to current behavior."""
+class TestLocalFixedSlotWhenWorldDisabled(unittest.TestCase):
+    """When World is disabled, Local-only exports should preserve the legacy single-source layout."""
 
     def setUp(self):
         self.gen = SMPGenerator()
@@ -4774,21 +5541,23 @@ class TestWorldBackwardCompatDisabled(unittest.TestCase):
             include_world_base_zooms=False
         )
         self.assertEqual(plan['sources'][0]['source_id'], 'mbtiles-source')
+        self.assertEqual(plan['sources'][0]['source_index'], 0)
 
-    def test_style_single_source(self):
+    def test_style_single_source_uses_legacy_slot(self):
         self.gen._get_bounds_wgs84 = MagicMock(return_value=[-1, -1, 1, 1])
         style = self.gen._create_style_from_canvas(
             _FakeRectangle(-1, -1, 1, 1), 5, 10, 'PNG'
         )
         source_ids = list(style['sources'].keys())
-        self.assertEqual(len(source_ids), 1)
-        self.assertEqual(source_ids[0], 'mbtiles-source')
+        self.assertEqual(source_ids, ['mbtiles-source'])
         self.assertEqual(
             style['metadata']['smp:sourceFolders']['mbtiles-source'], 's/0'
         )
+        raster_layers = [layer for layer in style['layers'] if layer['type'] == 'raster']
+        self.assertEqual([layer['id'] for layer in raster_layers], ['raster'])
 
-    def test_tiles_by_zoom_six_tuples_when_disabled(self):
-        """When world disabled, tiles_by_zoom tuples still have 7 elements (source_index=0)."""
+    def test_tiles_by_zoom_use_legacy_source_index(self):
+        """When World is disabled, tiles_by_zoom tuples should use source_index=0."""
         plan = self.gen._build_export_plan(
             _FakeRectangle(-1, -1, 1, 1), 5, 10,
             include_world_base_zooms=False
@@ -4855,17 +5624,17 @@ class TestCancellationMidSource(unittest.TestCase):
 
         tmp = tempfile.mkdtemp()
         try:
-            # Build an export plan with 2 sources (world enabled)
+            # Build an export plan with 2 sources (world + local)
             plan = self.gen._build_export_plan(
-                _FakeRectangle(-1, -1, 1, 1), 0, 2,
+                _FakeRectangle(-1, -1, 1, 1), 6, 7,
                 include_world_base_zooms=True, world_max_zoom=3
             )
             self.assertEqual(len(plan['sources']), 2)
 
             # Source 0 tiles (world, zooms 0-3)
             world_tiles = [t for t in plan['tiles_by_zoom'] if t[6] == 0]
-            # Source 1 tiles (region, zooms 0-2)
-            region_tiles = [t for t in plan['tiles_by_zoom'] if t[6] == 1]
+            # Source 2 tiles (local, zooms 6-7)
+            local_tiles = [t for t in plan['tiles_by_zoom'] if t[6] == 2]
 
             tiles_dir = os.path.join(tmp, 'tiles')
 
@@ -4885,10 +5654,10 @@ class TestCancellationMidSource(unittest.TestCase):
                     s0_files.append(os.path.join(root, fn))
             self.assertGreater(len(s0_files), 0, 'Source 0 tiles should exist')
 
-            # Source 1 tiles should NOT exist yet (not rendered before cancel)
-            s1_dir = os.path.join(tiles_dir, '1')
-            self.assertFalse(os.path.exists(s1_dir),
-                             'Source 1 tiles should not exist before resume')
+            # Source 2 tiles should NOT exist yet (not rendered before cancel)
+            s2_dir = os.path.join(tiles_dir, '2')
+            self.assertFalse(os.path.exists(s2_dir),
+                             'Source 2 tiles should not exist before resume')
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -4939,11 +5708,11 @@ class TestMultiSourceLogging(unittest.TestCase):
         pushed = self._run_with_plan(plan)
 
         self.assertTrue(
-            any("World overview tiles: 1 (source 0)" in m for m in pushed),
+            any("World Overview tiles: 1 (source 0)" in m for m in pushed),
             f"Expected per-source count for source 0. Got: {pushed}"
         )
         self.assertTrue(
-            any("Region detail tiles: 1 (source 1)" in m for m in pushed),
+            any("Region Detail tiles: 1 (source 1)" in m for m in pushed),
             f"Expected per-source count for source 1. Got: {pushed}"
         )
 

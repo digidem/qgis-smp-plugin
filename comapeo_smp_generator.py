@@ -11,6 +11,7 @@ import shutil
 import zipfile
 import tempfile
 import time
+from types import MappingProxyType
 from typing import NamedTuple
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from qgis.core import (
@@ -28,12 +29,77 @@ from qgis.PyQt.QtGui import QImage, QPainter, QImageWriter
 
 # Warn if estimated tile count exceeds this threshold
 TILE_COUNT_WARNING_THRESHOLD = 5000
+# Warn (non-blocking) when world coverage is requested above this zoom because
+# the full world pyramid grows quickly (sum(4**i for i in range(z+1))) and
+# becomes impractical to package.
+WORLD_MAX_ZOOM_WARNING_THRESHOLD = 8
+# Shared label substrings used in fixed-source configuration error messages.
+# Algorithm-level error matching imports these so the coupling is explicit
+# rather than depending on duplicated literal strings.
+_ZOOM_LABEL_WORLD_MAX = 'World maximum zoom'
+_ZOOM_LABEL_REGION_MIN = 'Region minimum zoom'
+_ZOOM_LABEL_REGION_MAX = 'Region maximum zoom'
+_ZOOM_LABEL_LOCAL_MIN = 'Local minimum zoom'
+
+# Stable codes for source-configuration errors. Downstream UI (Processing
+# algorithm) attaches localized hints by code so translated messages still
+# match the right hint regardless of language.
+SOURCE_CONFIG_ERROR_REGION_LOCAL_OVERLAP = 'region_local_zoom_overlap'
+SOURCE_CONFIG_ERROR_WORLD_REGION_OVERLAP = 'world_region_zoom_overlap'
+SOURCE_CONFIG_ERROR_WORLD_LOCAL_OVERLAP = 'world_local_zoom_overlap'
+SOURCE_CONFIG_ERROR_REGION_ZOOM_OUT_OF_RANGE = 'region_zoom_out_of_range'
+SOURCE_CONFIG_ERROR_REGION_ZOOM_INVERTED = 'region_zoom_inverted'
+SOURCE_CONFIG_ERROR_LOCAL_ZOOM_INVERTED = 'local_zoom_inverted'
+SOURCE_CONFIG_ERROR_WORLD_MAX_ZOOM_NEGATIVE = 'world_max_zoom_negative'
+SOURCE_CONFIG_ERROR_WORLD_MAX_ZOOM_EXCEEDS_MAX = 'world_max_zoom_exceeds_max'
+SOURCE_CONFIG_ERROR_REGION_EXTENT_REQUIRED = 'region_extent_required'
+SOURCE_CONFIG_ERROR_REGION_ZOOMS_REQUIRED = 'region_zooms_required'
+SOURCE_CONFIG_ERROR_REGION_CONTAINMENT = 'region_containment'
+SOURCE_CONFIG_ERROR_CRS_TRANSFORM = 'crs_transform'
+
+
+class SourceConfigError(ValueError):
+    """ValueError carrying a stable code so downstream UI can attach localized
+    hints regardless of the message's language."""
+
+    def __init__(self, message, code):
+        super().__init__(message)
+        self.code = code
 # Estimated bytes per tile (PNG ~50 KB, JPG ~15 KB)
 BYTES_PER_TILE_PNG = 50 * 1024
 BYTES_PER_TILE_JPG = 15 * 1024
 # Minimum free disk space to keep (100 MB)
 MIN_FREE_SPACE_BYTES = 100 * 1024 * 1024
 WORLD_BOUNDS_WGS84 = (-180.0, -85.0511, 180.0, 85.0511)
+FIXED_SOURCE_SLOTS = (
+    {
+        'role': 'world',
+        'source_id': 'world-overview',
+        'source_index': 0,
+        'name': 'World Overview',
+        'layer_id': 'world-raster',
+    },
+    {
+        'role': 'region',
+        'source_id': 'region-detail',
+        'source_index': 1,
+        'name': 'Region Detail',
+        'layer_id': 'region-raster',
+    },
+    {
+        'role': 'local',
+        'source_id': 'local-detail',
+        'source_index': 2,
+        'name': 'Local Detail',
+        'layer_id': 'local-raster',
+    },
+)
+SOURCE_SLOT_BY_ID = MappingProxyType({
+    slot['source_id']: slot for slot in FIXED_SOURCE_SLOTS
+})
+SOURCE_SLOT_BY_INDEX = MappingProxyType({
+    slot['source_index']: slot for slot in FIXED_SOURCE_SLOTS
+})
 
 
 class LocalHeaderEntry(NamedTuple):
@@ -168,8 +234,6 @@ class TileCache:
                 self._state['dirty'] = False
 
 
-
-
 class SMPGenerator:
     """
     Class to generate SMP (Styled Map Package) files for CoMapeo
@@ -299,8 +363,15 @@ class SMPGenerator:
 
     def _get_extent_for_zoom(self, extent, world_extent, zoom,
                              include_world_base_zooms=False, world_max_zoom=3):
-        """Return per-zoom extent according to world-base-zooms options."""
-        if include_world_base_zooms and zoom <= max(2, world_max_zoom):
+        """Return per-zoom extent according to world-base-zooms options.
+
+        DEPRECATED: Do not use on the main export path.  This helper does not
+        reflect the fixed-slot world/region/local model introduced in the
+        multi-source refactor.  Use ``_build_export_plan`` instead and consume
+        ``export_plan['tiles_by_zoom']`` for per-zoom extent and tile ranges.
+        Retained for preview/debug paths (e.g. get_tile_grid_rects).
+        """
+        if include_world_base_zooms and zoom <= world_max_zoom:
             return world_extent
         return extent
 
@@ -309,12 +380,19 @@ class SMPGenerator:
         """Return sorted zoom levels to export."""
         zooms = set(range(min_zoom, max_zoom + 1))
         if include_world_base_zooms:
-            zooms.update(range(0, max(2, world_max_zoom) + 1))
+            zooms.update(range(0, world_max_zoom + 1))
         return sorted(zooms)
 
     def _iter_export_ranges(self, extent, min_zoom, max_zoom,
                             include_world_base_zooms=False, world_max_zoom=3):
-        """Yield `(zoom, zoom_extent, ranges)` for the effective export plan."""
+        """Yield `(zoom, zoom_extent, ranges)` for the effective export plan.
+
+        DEPRECATED: Do not use on the main export path.  This helper does not
+        reflect the fixed-slot world/region/local model introduced in the
+        multi-source refactor.  Use ``_build_export_plan`` instead and consume
+        ``export_plan['tiles_by_zoom']`` for per-zoom extent and tile ranges.
+        Retained for preview/debug paths (e.g. get_tile_grid_rects).
+        """
         world_extent = self.get_world_extent() if include_world_base_zooms else None
         export_zooms = self._get_export_zooms(
             min_zoom, max_zoom,
@@ -331,13 +409,17 @@ class SMPGenerator:
             )
             yield zoom, zoom_extent, self._calculate_tiles_at_zoom(zoom_extent, zoom)
 
-    def _build_single_source_plan(self, extent, zoom_list, source_id, source_index):
+    def _build_single_source_plan(self, extent, zoom_list, source_id, source_index,
+                                  source_role=None, source_name=None, layer_id=None):
         """Build a per-source export plan with 7-element tiles_by_zoom tuples.
 
         :param extent: QgsRectangle extent for this source
         :param zoom_list: List of zoom levels to include
         :param source_id: Source identifier string (e.g. "world-overview")
-        :param source_index: Integer source index (0 for world/single, 1 for region)
+        :param source_index: Integer source index for the fixed source slot
+        :param source_role: Optional explicit semantic role override
+        :param source_name: Optional explicit display name override
+        :param layer_id: Optional explicit style layer id override
         :return: Dict with source_id, source_index, source_bounds, export_zooms,
                  tiles_by_zoom (7-tuples), total_tiles
         """
@@ -350,14 +432,235 @@ class SMPGenerator:
                 tiles_by_zoom.append((zoom, min_x, max_x, min_y, max_y, num_tiles, source_index))
                 total_tiles += num_tiles
 
-        return {
+        source_bounds = list(WORLD_BOUNDS_WGS84) if source_id == 'world-overview' else self._get_bounds_wgs84(extent)
+        slot_lookup = {
             'source_id': source_id,
             'source_index': source_index,
-            'source_bounds': self._get_bounds_wgs84(extent),
+        }
+        if source_role is not None:
+            slot_lookup['source_role'] = source_role
+        if source_name is not None:
+            slot_lookup['source_name'] = source_name
+        if layer_id is not None:
+            slot_lookup['layer_id'] = layer_id
+        slot = self._source_slot_for_plan(slot_lookup)
+        plan = {
+            'source_id': source_id,
+            'source_index': source_index,
+            'source_bounds': source_bounds,
             'export_zooms': list(zoom_list),
             'tiles_by_zoom': tiles_by_zoom,
             'total_tiles': total_tiles,
+            'source_role': slot['role'],
+            'source_name': slot['name'],
+            'layer_id': slot['layer_id'],
         }
+        return plan
+
+    @staticmethod
+    def _source_slot_for_plan(source_plan):
+        # Tier 1: known source_id (e.g. "world-overview") → fixed slot
+        source_id = source_plan.get('source_id')
+        source_index = source_plan.get('source_index', 0)
+        base_slot = SOURCE_SLOT_BY_ID.get(source_id)
+        if base_slot is None:
+            # Tier 2: known source_index (0/1/2) → slot by position
+            base_slot = SOURCE_SLOT_BY_INDEX.get(source_index)
+        if base_slot is None:
+            # Tier 3: unknown source → generate synthetic slot
+            source_id = source_id or f'source-{source_index}'
+            base_slot = {
+                'role': f'source-{source_index}',
+                'source_id': source_id,
+                'source_index': source_index,
+                'name': source_id,
+                'layer_id': f'source-{source_index}-raster',
+            }
+        else:
+            base_slot = dict(base_slot)
+
+        base_slot['source_id'] = source_id or base_slot['source_id']
+        base_slot['source_index'] = source_index
+        if 'source_role' in source_plan:
+            base_slot['role'] = source_plan['source_role']
+        if 'source_name' in source_plan:
+            base_slot['name'] = source_plan['source_name']
+        if 'layer_id' in source_plan:
+            base_slot['layer_id'] = source_plan['layer_id']
+        return base_slot
+
+    @staticmethod
+    def _root_default_zoom(min_zoom, max_zoom):
+        """Pick a reasonable initial zoom between min and max, capped at 11.
+
+        Ensures at least min_zoom, at most max_zoom, and prefers
+        max_zoom - 2 or 11 whichever is lower."""
+        return min(
+            max_zoom,
+            max(max(min_zoom, 0), min(max_zoom - 2, 11))
+        )
+
+    @staticmethod
+    def _zoom_gap_levels(export_zooms):
+        if not export_zooms:
+            return []
+        zoom_set = set(export_zooms)
+        return [
+            zoom for zoom in range(export_zooms[0], export_zooms[-1] + 1)
+            if zoom not in zoom_set
+        ]
+
+    @staticmethod
+    def _longitude_intervals(extent):
+        west = extent.xMinimum()
+        east = extent.xMaximum()
+        if west <= east:
+            return [(west, east)]
+        return [(west, 180.0), (-180.0, east)]
+
+    @classmethod
+    def _extent_contains(cls, outer_extent, inner_extent):
+        if outer_extent.yMinimum() > inner_extent.yMinimum():
+            return False
+        if outer_extent.yMaximum() < inner_extent.yMaximum():
+            return False
+
+        outer_intervals = cls._longitude_intervals(outer_extent)
+        inner_intervals = cls._longitude_intervals(inner_extent)
+        for inner_start, inner_end in inner_intervals:
+            if not any(
+                outer_start <= inner_start and outer_end >= inner_end
+                for outer_start, outer_end in outer_intervals
+            ):
+                return False
+        return True
+
+    @classmethod
+    def _extent_contains_bounds(cls, outer, inner):
+        class _BoundsRect:
+            def __init__(self, b):
+                self._w, self._s, self._e, self._n = b
+
+            def xMinimum(self):
+                return self._w
+
+            def xMaximum(self):
+                return self._e
+
+            def yMinimum(self):
+                return self._s
+
+            def yMaximum(self):
+                return self._n
+        return cls._extent_contains(_BoundsRect(outer), _BoundsRect(inner))
+
+    def _source_label_map(self, source_plans):
+        labels = {
+            slot['source_index']: slot['name'] for slot in FIXED_SOURCE_SLOTS
+        }
+        for source_plan in source_plans or []:
+            source_index = source_plan.get('source_index')
+            if source_index is None:
+                continue
+            labels[source_index] = source_plan.get(
+                'source_name',
+                self._source_slot_for_plan(source_plan)['name']
+            )
+        return labels
+
+    @classmethod
+    def _source_plan_signature(cls, source_plans):
+        parts = []
+        for source_plan in source_plans:
+            bounds = ','.join(
+                format(float(value), '.10g')
+                for value in source_plan.get('source_bounds', [])
+            )
+            export_zooms = source_plan.get('export_zooms', [])
+            if export_zooms:
+                zoom_signature = ','.join(str(z) for z in export_zooms)
+            else:
+                zoom_signature = 'none'
+            parts.append(
+                f"{source_plan.get('source_index')}:{source_plan.get('source_id')}:{zoom_signature}:{bounds}"
+            )
+        return '|'.join(parts)
+
+    def _validate_fixed_source_configuration(self, extent, min_zoom, max_zoom,
+                                             include_world_base_zooms=False,
+                                             world_max_zoom=3,
+                                             include_region=False,
+                                             region_extent=None,
+                                             region_min_zoom=None,
+                                             region_max_zoom=None):
+        if min_zoom > max_zoom:
+            raise SourceConfigError(
+                f"Local minimum zoom ({min_zoom}) must not exceed local maximum zoom ({max_zoom}).",
+                SOURCE_CONFIG_ERROR_LOCAL_ZOOM_INVERTED,
+            )
+
+        if include_world_base_zooms and world_max_zoom < 0:
+            raise SourceConfigError(
+                'World maximum zoom must be greater than or equal to 0.',
+                SOURCE_CONFIG_ERROR_WORLD_MAX_ZOOM_NEGATIVE,
+            )
+
+        if include_world_base_zooms and world_max_zoom > 24:
+            raise SourceConfigError(
+                'World maximum zoom must not exceed 24.',
+                SOURCE_CONFIG_ERROR_WORLD_MAX_ZOOM_EXCEEDS_MAX,
+            )
+
+        if include_region:
+            if region_extent is None:
+                raise SourceConfigError(
+                    'Region extent is required when INCLUDE_REGION is enabled.',
+                    SOURCE_CONFIG_ERROR_REGION_EXTENT_REQUIRED,
+                )
+            if region_min_zoom is None or region_max_zoom is None:
+                raise SourceConfigError(
+                    'Region min/max zoom values are required when INCLUDE_REGION is enabled.',
+                    SOURCE_CONFIG_ERROR_REGION_ZOOMS_REQUIRED,
+                )
+            for label, value in ((_ZOOM_LABEL_REGION_MIN, region_min_zoom),
+                                 (_ZOOM_LABEL_REGION_MAX, region_max_zoom)):
+                if not (0 <= value <= 24):
+                    raise SourceConfigError(
+                        f"{label} ({value}) must be between 0 and 24.",
+                        SOURCE_CONFIG_ERROR_REGION_ZOOM_OUT_OF_RANGE,
+                    )
+            if region_min_zoom > region_max_zoom:
+                raise SourceConfigError(
+                    f"{_ZOOM_LABEL_REGION_MIN} ({region_min_zoom}) must not exceed "
+                    f"{_ZOOM_LABEL_REGION_MAX} ({region_max_zoom}).",
+                    SOURCE_CONFIG_ERROR_REGION_ZOOM_INVERTED,
+                )
+            try:
+                region_wgs84 = self._get_bounds_wgs84(region_extent)
+                extent_wgs84 = self._get_bounds_wgs84(extent)
+            except Exception as exc:
+                raise SourceConfigError(
+                    'Unable to transform extent to WGS84. '
+                    'Check that your project CRS is valid and supported.',
+                    SOURCE_CONFIG_ERROR_CRS_TRANSFORM,
+                ) from exc
+            if not self._extent_contains_bounds(region_wgs84, extent_wgs84):
+                raise SourceConfigError(
+                    'Local extent must be fully contained within the Region extent.',
+                    SOURCE_CONFIG_ERROR_REGION_CONTAINMENT,
+                )
+            if include_world_base_zooms and world_max_zoom >= region_min_zoom:
+                raise SourceConfigError(
+                    f"{_ZOOM_LABEL_WORLD_MAX} ({world_max_zoom}) must be less than "
+                    f"{_ZOOM_LABEL_REGION_MIN} ({region_min_zoom}).",
+                    SOURCE_CONFIG_ERROR_WORLD_REGION_OVERLAP,
+                )
+        elif include_world_base_zooms and world_max_zoom >= min_zoom:
+            raise SourceConfigError(
+                f"{_ZOOM_LABEL_WORLD_MAX} ({world_max_zoom}) must be less than "
+                f"{_ZOOM_LABEL_LOCAL_MIN} ({min_zoom}) when Region is disabled.",
+                SOURCE_CONFIG_ERROR_WORLD_LOCAL_OVERLAP,
+            )
 
     @staticmethod
     def _merged_interval_length(intervals):
@@ -417,63 +720,153 @@ class SMPGenerator:
         return total
 
     def _build_export_plan(self, extent, min_zoom, max_zoom,
-                           include_world_base_zooms=False, world_max_zoom=3):
-        """Return a normalized export plan shared by estimates, rendering, and packaging."""
+                           include_world_base_zooms=False, world_max_zoom=3,
+                           include_region=False, region_extent=None,
+                           region_min_zoom=None, region_max_zoom=None):
+        """Return a normalized fixed-slot export plan for world/region/local."""
+        self._validate_fixed_source_configuration(
+            extent,
+            min_zoom,
+            max_zoom,
+            include_world_base_zooms=include_world_base_zooms,
+            world_max_zoom=world_max_zoom,
+            include_region=include_region,
+            region_extent=region_extent,
+            region_min_zoom=region_min_zoom,
+            region_max_zoom=region_max_zoom,
+        )
+
+        # Auto-adjust Local minimum zoom for seamless source hand-off.
+        # - Gap fill: when Region is off and World < Local, pull Local
+        #   down to World+1 so there is no coverage gap.
+        # - Overlap raise: when Region is on and Local overlaps Region,
+        #   push Local up to Region+1 so sources don't conflict.
+        auto_adjust_warnings = []
+        if (
+            not include_region
+            and include_world_base_zooms
+            and world_max_zoom + 1 < min_zoom
+            and world_max_zoom + 1 <= max_zoom
+        ):
+            auto_adjust_warnings.append(
+                f"Local minimum zoom adjusted from {min_zoom} to "
+                f"{world_max_zoom + 1} to bridge gap with World maximum "
+                f"zoom ({world_max_zoom})."
+            )
+            min_zoom = world_max_zoom + 1
+        elif (
+            include_region
+            and region_max_zoom is not None
+            and region_max_zoom >= min_zoom
+            and region_max_zoom + 1 <= max_zoom
+        ):
+            auto_adjust_warnings.append(
+                f"Local minimum zoom adjusted from {min_zoom} to "
+                f"{region_max_zoom + 1} to avoid overlap with Region maximum "
+                f"zoom ({region_max_zoom})."
+            )
+            min_zoom = region_max_zoom + 1
+        elif (
+            include_region
+            and region_max_zoom is not None
+            and region_max_zoom >= min_zoom
+        ):
+            # Auto-raise is impossible because max_zoom is too low.
+            # Surface this as a hard error so the user can expand the
+            # Local zoom range or lower the Region boundary.
+            raise SourceConfigError(
+                f"{_ZOOM_LABEL_REGION_MAX} ({region_max_zoom}) must be less than "
+                f"{_ZOOM_LABEL_LOCAL_MIN} ({min_zoom}), but raising Local minimum "
+                f"zoom above {max_zoom} would leave no room for Local tiles. "
+                f"Increase Local maximum zoom or lower Region maximum zoom.",
+                SOURCE_CONFIG_ERROR_REGION_LOCAL_OVERLAP,
+            )
+
         sources = []
 
         if include_world_base_zooms:
-            world_extent = self.get_world_extent()
-            world_zoom_max = max(2, world_max_zoom)
-            world_zoom_list = list(range(0, world_zoom_max + 1))
             world_plan = self._build_single_source_plan(
-                world_extent, world_zoom_list,
-                source_id="world-overview", source_index=0
+                self.get_world_extent(),
+                list(range(0, world_max_zoom + 1)),
+                source_id="world-overview",
+                source_index=SOURCE_SLOT_BY_ID['world-overview']['source_index'],
             )
-            region_zoom_list = list(range(min_zoom, max_zoom + 1))
-            region_plan = self._build_single_source_plan(
-                extent, region_zoom_list,
-                source_id="region-detail", source_index=1
-            )
-            sources = [world_plan, region_plan]
-        else:
-            zoom_list = list(range(min_zoom, max_zoom + 1))
-            single_plan = self._build_single_source_plan(
-                extent, zoom_list,
-                source_id="mbtiles-source", source_index=0
-            )
-            sources = [single_plan]
+            sources.append(world_plan)
 
-        # Merge per-source tiles_by_zoom into a single flat list
+        # Fixed-slot assignment: World=0, Region=1, Local=2.
+        # When world or region is disabled, those slots are simply absent
+        # (sparse indices are intentional — SMP consumers must handle gaps).
+        #
+        # Local-only backward compat: when neither world nor region is enabled,
+        # the local source uses the legacy "mbtiles-source" source_id on slot
+        # s/0 so that existing SMP consumers that predate the fixed-slot spec
+        # continue to work.  When world or region IS enabled, local uses
+        # "local-detail" on s/2 per the fixed-slot contract.
+        if include_region:
+            region_plan = self._build_single_source_plan(
+                region_extent,
+                list(range(region_min_zoom, region_max_zoom + 1)),
+                source_id="region-detail",
+                source_index=SOURCE_SLOT_BY_ID['region-detail']['source_index'],
+            )
+            sources.append(region_plan)
+
+        if not include_world_base_zooms and not include_region:
+            local_plan = self._build_single_source_plan(
+                extent,
+                list(range(min_zoom, max_zoom + 1)),
+                source_id="mbtiles-source",
+                source_index=0,
+                source_role='local',
+                source_name='QGIS Map',
+                layer_id='raster',
+            )
+        else:
+            local_plan = self._build_single_source_plan(
+                extent,
+                list(range(min_zoom, max_zoom + 1)),
+                source_id="local-detail",
+                source_index=SOURCE_SLOT_BY_ID['local-detail']['source_index'],
+            )
+        sources.append(local_plan)
+
         tiles_by_zoom = []
         for src in sources:
             tiles_by_zoom.extend(src['tiles_by_zoom'])
 
         total_tiles = sum(s['total_tiles'] for s in sources)
-
-        # Compute export_zooms as the union of all source zooms
-        export_zooms = sorted(set(
-            z for src in sources for z in src['export_zooms']
-        ))
-
-        if include_world_base_zooms and sources:
-            world_coverage_tiles = self._count_unique_tiles_in_ranges(tiles_by_zoom)
-        else:
-            world_coverage_tiles = total_tiles
-
+        export_zooms = sorted({z for src in sources for z in src['export_zooms']})
+        gap_zooms = self._zoom_gap_levels(export_zooms)
+        world_coverage_tiles = self._count_unique_tiles_in_ranges(tiles_by_zoom)
         world_tiles = sum(4 ** zoom for zoom in export_zooms)
+
+        # Non-blocking advisory warnings surfaced to callers (Processing
+        # algorithm forwards them via feedback.pushWarning).
+        warnings = auto_adjust_warnings
+        if (
+            include_world_base_zooms
+            and world_max_zoom > WORLD_MAX_ZOOM_WARNING_THRESHOLD
+        ):
+            full_world_pyramid = sum(4 ** i for i in range(world_max_zoom + 1))
+            warnings.append(
+                f"World maximum zoom ({world_max_zoom}) exceeds the recommended "
+                f"limit of {WORLD_MAX_ZOOM_WARNING_THRESHOLD}: a full world "
+                f"pyramid at this zoom contains {full_world_pyramid:,} tiles, "
+                f"which is impractical to package. Consider lowering "
+                f"World maximum zoom."
+            )
+
         return {
             'export_zooms': export_zooms,
+            'gap_zooms': gap_zooms,
             'tiles_by_zoom': tiles_by_zoom,
             'total_tiles': total_tiles,
             'world_coverage_tiles': world_coverage_tiles,
             'world_tiles': world_tiles,
             'world_pct': (world_coverage_tiles / world_tiles) * 100 if world_tiles else 0,
-            'source_bounds': (
-                list(WORLD_BOUNDS_WGS84)
-                if include_world_base_zooms
-                else self._get_bounds_wgs84(extent)
-            ),
+            'source_bounds': local_plan['source_bounds'],
             'sources': sources,
+            'warnings': warnings,
         }
 
     @staticmethod
@@ -511,31 +904,47 @@ class SMPGenerator:
         return tile_count * bytes_per_tile
 
     def estimate_mixed_tile_count(self, extent, min_zoom, max_zoom,
-                                  include_world_base_zooms=False, world_max_zoom=3):
-        """Estimate total tiles using world extent at low zooms when enabled."""
+                                  include_world_base_zooms=False, world_max_zoom=3,
+                                  include_region=False, region_extent=None,
+                                  region_min_zoom=None, region_max_zoom=None):
+        """Estimate total tiles using the fixed world/region/local source model."""
         return self._build_export_plan(
             extent,
             min_zoom,
             max_zoom,
             include_world_base_zooms=include_world_base_zooms,
-            world_max_zoom=world_max_zoom
+            world_max_zoom=world_max_zoom,
+            include_region=include_region,
+            region_extent=region_extent,
+            region_min_zoom=region_min_zoom,
+            region_max_zoom=region_max_zoom,
         )['total_tiles']
 
     def estimate_world_pyramid_percentage(self, extent, min_zoom, max_zoom,
                                           include_world_base_zooms=False,
-                                          world_max_zoom=3):
+                                          world_max_zoom=3,
+                                          include_region=False,
+                                          region_extent=None,
+                                          region_min_zoom=None,
+                                          region_max_zoom=None):
         """Return unique export coverage and full-world pyramid totals."""
         plan = self._build_export_plan(
             extent,
             min_zoom,
             max_zoom,
             include_world_base_zooms=include_world_base_zooms,
-            world_max_zoom=world_max_zoom
+            world_max_zoom=world_max_zoom,
+            include_region=include_region,
+            region_extent=region_extent,
+            region_min_zoom=region_min_zoom,
+            region_max_zoom=region_max_zoom,
         )
         return plan['world_coverage_tiles'], plan['world_tiles'], plan['world_pct']
 
     def estimate_tile_count(self, extent, min_zoom, max_zoom,
-                            include_world_base_zooms=False, world_max_zoom=3):
+                            include_world_base_zooms=False, world_max_zoom=3,
+                            include_region=False, region_extent=None,
+                            region_min_zoom=None, region_max_zoom=None):
         """
         Estimate the total number of tiles that will be generated.
 
@@ -549,11 +958,17 @@ class SMPGenerator:
             min_zoom,
             max_zoom,
             include_world_base_zooms=include_world_base_zooms,
-            world_max_zoom=world_max_zoom
+            world_max_zoom=world_max_zoom,
+            include_region=include_region,
+            region_extent=region_extent,
+            region_min_zoom=region_min_zoom,
+            region_max_zoom=region_max_zoom,
         )
 
     def validate_tile_count(self, extent, min_zoom, max_zoom,
-                            include_world_base_zooms=False, world_max_zoom=3):
+                            include_world_base_zooms=False, world_max_zoom=3,
+                            include_region=False, region_extent=None,
+                            region_min_zoom=None, region_max_zoom=None):
         """
         Check estimated tile count and return (count, warning_message).
 
@@ -567,7 +982,11 @@ class SMPGenerator:
             min_zoom,
             max_zoom,
             include_world_base_zooms=include_world_base_zooms,
-            world_max_zoom=world_max_zoom
+            world_max_zoom=world_max_zoom,
+            include_region=include_region,
+            region_extent=region_extent,
+            region_min_zoom=region_min_zoom,
+            region_max_zoom=region_max_zoom,
         )
         warning = None
 
@@ -635,42 +1054,73 @@ class SMPGenerator:
         return None
 
     def get_tile_grid_rects(self, extent, min_zoom, max_zoom,
-                            include_world_base_zooms=False, world_max_zoom=3):
+                            include_world_base_zooms=False, world_max_zoom=3,
+                            include_region=False, region_extent=None,
+                            region_min_zoom=None, region_max_zoom=None,
+                            export_plan=None):
         """
         Return the WGS84 bounding rectangles of all tiles that would be generated.
 
         This helper is kept for preview/debug workflows and tests even though
-        the current QGIS UI does not yet expose a tile-grid preview.
+        the current QGIS UI does not yet expose a tile-grid preview. It mirrors
+        the fixed world/region/local export plan so callers can inspect the
+        final sparse source layout without invoking a render.
 
         :param extent: QgsRectangle extent in project CRS
-        :param min_zoom: Minimum zoom level
-        :param max_zoom: Maximum zoom level
+        :param min_zoom: Minimum Local zoom level
+        :param max_zoom: Maximum Local zoom level
         :return: list of dicts:
                  [{"zoom": z, "x": x, "y": y,
-                   "west": w, "south": s, "east": e, "north": n}, ...]
+                   "west": w, "south": s, "east": e, "north": n,
+                   "source_index": i, "source_id": sid,
+                   "source_role": role}, ...]
         """
+        if export_plan is None:
+            export_plan = self._build_export_plan(
+                extent,
+                min_zoom,
+                max_zoom,
+                include_world_base_zooms=include_world_base_zooms,
+                world_max_zoom=world_max_zoom,
+                include_region=include_region,
+                region_extent=region_extent,
+                region_min_zoom=region_min_zoom,
+                region_max_zoom=region_max_zoom,
+            )
+
         rects = []
-        for zoom, _zoom_extent, ranges in self._iter_export_ranges(
-            extent,
-            min_zoom,
-            max_zoom,
-            include_world_base_zooms=include_world_base_zooms,
-            world_max_zoom=world_max_zoom
-        ):
-            for min_x, max_x, min_y, max_y in ranges:
-                for x in range(min_x, max_x + 1):
-                    for y in range(min_y, max_y + 1):
-                        north, west = self._num2deg(x, y, zoom)
-                        south, east = self._num2deg(x + 1, y + 1, zoom)
-                        rects.append({
-                            "zoom": zoom,
-                            "x": x,
-                            "y": y,
-                            "west": west,
-                            "south": south,
-                            "east": east,
-                            "north": north
-                        })
+        source_meta = {}
+        for source_plan in export_plan.get('sources', []):
+            slot = self._source_slot_for_plan(source_plan)
+            source_meta[source_plan['source_index']] = {
+                'source_id': source_plan.get('source_id', slot['source_id']),
+                'source_role': slot['role'],
+            }
+
+        for zoom, min_x, max_x, min_y, max_y, _, source_index in export_plan.get('tiles_by_zoom', []):
+            slot_meta = source_meta.get(source_index)
+            if slot_meta is None:
+                slot = self._source_slot_for_plan({'source_index': source_index})
+                slot_meta = {
+                    'source_id': slot['source_id'],
+                    'source_role': slot['role'],
+                }
+            for x in range(min_x, max_x + 1):
+                for y in range(min_y, max_y + 1):
+                    north, west = self._num2deg(x, y, zoom)
+                    south, east = self._num2deg(x + 1, y + 1, zoom)
+                    rects.append({
+                        "zoom": zoom,
+                        "x": x,
+                        "y": y,
+                        "west": west,
+                        "south": south,
+                        "east": east,
+                        "north": north,
+                        "source_index": source_index,
+                        "source_id": slot_meta['source_id'],
+                        "source_role": slot_meta['source_role'],
+                    })
         return rects
 
     def generate_smp_from_canvas(self, extent, min_zoom, max_zoom, output_path,
@@ -678,6 +1128,10 @@ class SMPGenerator:
                                  max_workers=None,
                                  include_world_base_zooms=False,
                                  world_max_zoom=3,
+                                 include_region=False,
+                                 region_extent=None,
+                                 region_min_zoom=None,
+                                 region_max_zoom=None,
                                  export_plan=None):
         """
         Generate an SMP file from the current map canvas
@@ -712,7 +1166,11 @@ class SMPGenerator:
                 min_zoom,
                 max_zoom,
                 include_world_base_zooms=include_world_base_zooms,
-                world_max_zoom=world_max_zoom
+                world_max_zoom=world_max_zoom,
+                include_region=include_region,
+                region_extent=region_extent,
+                region_min_zoom=region_min_zoom,
+                region_max_zoom=region_max_zoom,
             )
         tile_count = export_plan['total_tiles']
         count_warning = None
@@ -725,6 +1183,10 @@ class SMPGenerator:
         estimated_mb = estimated_bytes / (1024 * 1024)
         self.log(f"Include world base zooms: {include_world_base_zooms}")
         self.log(f"World max zoom: {world_max_zoom}")
+        self.log(f"Include region detail: {include_region}")
+        if include_region and region_extent is not None:
+            self.log(f"Region extent: {region_extent.asWktPolygon()}")
+            self.log(f"Region zooms: {region_min_zoom}-{region_max_zoom}")
         self.log(f"Estimated tile count: {tile_count:,}")
         self.log(f"Estimated output size: {estimated_mb:.1f} MB")
         self.log(f"Estimated world pyramid coverage: {export_plan['world_pct']:.2f}%")
@@ -752,7 +1214,10 @@ class SMPGenerator:
                 extent, min_zoom, max_zoom, tile_format,
                 include_world_base_zooms=include_world_base_zooms,
                 world_max_zoom=world_max_zoom,
-                source_bounds=export_plan['source_bounds'],
+                include_region=include_region,
+                region_extent=region_extent,
+                region_min_zoom=region_min_zoom,
+                region_max_zoom=region_max_zoom,
                 source_plans=source_plans
             )
             style_path = os.path.join(temp_dir, "style.json")
@@ -774,6 +1239,10 @@ class SMPGenerator:
                 tile_cache=tile_cache,
                 include_world_base_zooms=include_world_base_zooms,
                 world_max_zoom=world_max_zoom,
+                include_region=include_region,
+                region_extent=region_extent,
+                region_min_zoom=region_min_zoom,
+                region_max_zoom=region_max_zoom,
                 export_plan=export_plan
             )
             if tile_cache is not None:
@@ -826,9 +1295,12 @@ class SMPGenerator:
             return base_name
         return "QGIS MAP"
 
-    def _create_style_from_canvas(self, extent, min_zoom, max_zoom, tile_format=None,
-                                 include_world_base_zooms=False, world_max_zoom=3,
-                                 source_bounds=None, source_plans=None):
+    def _create_style_from_canvas(
+            self, extent, min_zoom, max_zoom, tile_format=None,
+            include_world_base_zooms=False, world_max_zoom=3,
+            include_region=False, region_extent=None,
+            region_min_zoom=None, region_max_zoom=None,
+            source_plans=None):
         """
         Create a MapLibre style JSON from the current map canvas
 
@@ -836,7 +1308,13 @@ class SMPGenerator:
         :param min_zoom: Minimum zoom level
         :param max_zoom: Maximum zoom level
         :param tile_format: Tile image format ('PNG' or 'JPG')
-        :param source_plans: Optional list of per-source plan dicts for multi-source
+        :param include_world_base_zooms: Whether to include world overview source
+        :param world_max_zoom: Maximum zoom for world overview tiles
+        :param include_region: Whether to include region detail source
+        :param region_extent: QgsRectangle extent for region source
+        :param region_min_zoom: Minimum zoom for region source
+        :param region_max_zoom: Maximum zoom for region source
+        :param source_plans: Optional list of per-source plan dicts for fixed-slot multi-source
         :return: Style JSON object
         """
         if tile_format is None:
@@ -844,160 +1322,95 @@ class SMPGenerator:
 
         tile_ext = self._tile_extension(tile_format)
 
-        # Multi-source style (world enabled with separate sources)
-        if source_plans is not None and len(source_plans) == 2:
-            world_plan = source_plans[0]
-            region_plan = source_plans[1]
-
-            world_bounds = world_plan['source_bounds']
-            region_bounds = region_plan['source_bounds']
-
-            center_lon = (region_bounds[0] + region_bounds[2]) / 2
-            center_lat = (region_bounds[1] + region_bounds[3]) / 2
-
-            default_zoom = min(
+        if source_plans is None:
+            export_plan = self._build_export_plan(
+                extent,
+                min_zoom,
                 max_zoom,
-                max(max(min_zoom, 0), min(max_zoom - 2, 11))
+                include_world_base_zooms=include_world_base_zooms,
+                world_max_zoom=world_max_zoom,
+                include_region=include_region,
+                region_extent=region_extent,
+                region_min_zoom=region_min_zoom,
+                region_max_zoom=region_max_zoom,
             )
+            source_plans = export_plan.get('sources', [])
 
-            style = {
-                "version": 8,
-                "name": self._project_title_or_default(),
-                "sources": {
-                    world_plan['source_id']: {
-                        "format": tile_ext,
-                        "name": "World Overview",
-                        "version": "2.0",
-                        "type": "raster",
-                        "minzoom": world_plan['export_zooms'][0],
-                        "maxzoom": world_plan['export_zooms'][-1],
-                        "scheme": "xyz",
-                        "bounds": world_bounds,
-                        "tiles": [
-                            f"smp://maps.v1/s/{world_plan['source_index']}/{{z}}/{{x}}/{{y}}.{tile_ext}"
-                        ]
-                    },
-                    region_plan['source_id']: {
-                        "format": tile_ext,
-                        "name": "Region Detail",
-                        "version": "2.0",
-                        "type": "raster",
-                        "minzoom": region_plan['export_zooms'][0],
-                        "maxzoom": region_plan['export_zooms'][-1],
-                        "scheme": "xyz",
-                        "bounds": region_bounds,
-                        "tiles": [
-                            f"smp://maps.v1/s/{region_plan['source_index']}/{{z}}/{{x}}/{{y}}.{tile_ext}"
-                        ]
-                    }
-                },
-                "layers": [
-                    {
-                        "id": "background",
-                        "type": "background",
-                        "paint": {
-                            "background-color": "white"
-                        }
-                    },
-                    {
-                        "id": "world-raster",
-                        "type": "raster",
-                        "source": world_plan['source_id'],
-                        "paint": {
-                            "raster-opacity": 1
-                        }
-                    },
-                    {
-                        "id": "region-raster",
-                        "type": "raster",
-                        "source": region_plan['source_id'],
-                        "paint": {
-                            "raster-opacity": 1
-                        }
-                    }
-                ],
-                "metadata": {
-                    "smp:bounds": region_bounds,
-                    "smp:maxzoom": max_zoom,
-                    "smp:sourceFolders": {
-                        world_plan['source_id']: f"s/{world_plan['source_index']}",
-                        region_plan['source_id']: f"s/{region_plan['source_index']}"
-                    }
-                },
-                "center": [center_lon, center_lat],
-                "zoom": default_zoom
-            }
-            return style
+        if not source_plans:
+            raise ValueError('Source plan is required to create SMP style metadata.')
 
-        # Single-source style (backward compat, world disabled or source_plans=None)
-        if source_bounds is not None:
-            bounds = source_bounds
-        elif include_world_base_zooms:
-            bounds = list(WORLD_BOUNDS_WGS84)
-        else:
-            bounds = self._get_bounds_wgs84(extent)
-
-        center_lon = (bounds[0] + bounds[2]) / 2
-        center_lat = (bounds[1] + bounds[3]) / 2
-
-        effective_min_zoom = min_zoom
-        if include_world_base_zooms:
-            effective_min_zoom = min(effective_min_zoom, 0)
-
-        default_zoom = min(
-            max_zoom,
-            max(max(min_zoom, 0), min(max_zoom - 2, 11))
+        # Find the local plan by source_id rather than assuming it is last.
+        # When world + region + local are all present the order is
+        # [world, region, local], but the standalone path produces a single
+        # "mbtiles-source" plan.
+        local_plan = next(
+            (sp for sp in source_plans
+             if sp.get('source_id') in ('local-detail', 'mbtiles-source')),
+            None,
         )
+        if local_plan is None:
+            raise ValueError(
+                'No local source plan found in source_plans. '
+                'Expected a source with source_id "local-detail" or "mbtiles-source".'
+            )
+        local_bounds = local_plan['source_bounds']
+        center_lon = (local_bounds[0] + local_bounds[2]) / 2
+        center_lat = (local_bounds[1] + local_bounds[3]) / 2
+        default_zoom = self._root_default_zoom(min_zoom, max_zoom)
 
-        # Determine source_id from source_plans if available
-        if source_plans is not None and len(source_plans) == 1:
-            source_id = source_plans[0]['source_id']
-            src_index = source_plans[0]['source_index']
-        else:
-            source_id = "mbtiles-source"
-            src_index = 0
+        sources = {}
+        layers = [
+            {
+                "id": "background",
+                "type": "background",
+                "paint": {
+                    "background-color": "white"
+                }
+            }
+        ]
+        source_folders = {}
+
+        for source_plan in source_plans:
+            source_id = source_plan['source_id']
+            source_index = source_plan['source_index']
+            slot = self._source_slot_for_plan(source_plan)
+            source_name = source_plan.get('source_name', slot['name'])
+            export_zooms = source_plan.get('export_zooms', [])
+            if not export_zooms:
+                continue
+
+            sources[source_id] = {
+                "format": tile_ext,
+                "name": source_name,
+                "version": "2.0",
+                "type": "raster",
+                "minzoom": export_zooms[0],
+                "maxzoom": export_zooms[-1],
+                "scheme": "xyz",
+                "bounds": source_plan['source_bounds'],
+                "tiles": [
+                    f"smp://maps.v1/s/{source_index}/{{z}}/{{x}}/{{y}}.{tile_ext}"
+                ]
+            }
+            layers.append({
+                "id": slot['layer_id'],
+                "type": "raster",
+                "source": source_id,
+                "paint": {
+                    "raster-opacity": 1
+                }
+            })
+            source_folders[source_id] = f"s/{source_index}"
 
         style = {
             "version": 8,
             "name": self._project_title_or_default(),
-            "sources": {
-                source_id: {
-                    "format": tile_ext,
-                    "name": "QGIS Map",
-                    "version": "2.0",
-                    "type": "raster",
-                    "minzoom": effective_min_zoom,
-                    "maxzoom": max_zoom,
-                    "scheme": "xyz",
-                    "bounds": bounds,
-                    "tiles": [
-                        f"smp://maps.v1/s/{src_index}/{{z}}/{{x}}/{{y}}.{tile_ext}"
-                    ]
-                }
-            },
-            "layers": [
-                {
-                    "id": "background",
-                    "type": "background",
-                    "paint": {
-                        "background-color": "white"
-                    }
-                },
-                {
-                    "id": "raster",
-                    "type": "raster",
-                    "source": source_id,
-                    "paint": {
-                        "raster-opacity": 1
-                    }
-                }
-            ],
+            "sources": sources,
+            "layers": layers,
             "metadata": {
-                "smp:bounds": bounds,
+                "smp:bounds": local_bounds,
                 "smp:maxzoom": max_zoom,
-                "smp:sourceFolders": {
-                    source_id: f"s/{src_index}"
-                }
+                "smp:sourceFolders": source_folders
             },
             "center": [center_lon, center_lat],
             "zoom": default_zoom
@@ -1224,6 +1637,10 @@ class SMPGenerator:
                                     max_workers=None, tile_cache=None,
                                     include_world_base_zooms=False,
                                     world_max_zoom=3,
+                                    include_region=False,
+                                    region_extent=None,
+                                    region_min_zoom=None,
+                                    region_max_zoom=None,
                                     export_plan=None):
         """
         Generate tiles from the current map canvas
@@ -1258,11 +1675,6 @@ class SMPGenerator:
         # the first node is the topmost layer and is rendered on top.
         visible_layers = self._visible_layers_in_render_order(project)
         map_settings.setLayers(visible_layers)
-        fingerprint = TileCache.make_fingerprint(
-            tile_format,
-            jpeg_quality,
-            self._project_cache_fingerprint(project, visible_layers)
-        )
 
         if export_plan is None:
             export_plan = self._build_export_plan(
@@ -1270,10 +1682,21 @@ class SMPGenerator:
                 min_zoom,
                 max_zoom,
                 include_world_base_zooms=include_world_base_zooms,
-                world_max_zoom=world_max_zoom
+                world_max_zoom=world_max_zoom,
+                include_region=include_region,
+                region_extent=region_extent,
+                region_min_zoom=region_min_zoom,
+                region_max_zoom=region_max_zoom,
             )
         total_tiles = export_plan['total_tiles']
         tiles_by_zoom = export_plan['tiles_by_zoom']
+        source_plans = export_plan.get('sources', [])
+        fingerprint = TileCache.make_fingerprint(
+            tile_format,
+            jpeg_quality,
+            self._project_cache_fingerprint(project, visible_layers),
+            self._source_plan_signature(source_plans)
+        )
 
         self.log(f"Total tiles to generate: {total_tiles}")
 
@@ -1291,8 +1714,8 @@ class SMPGenerator:
         source_tile_counts = {}
         for _z, _mx, _Mx, _my, _My, num_tiles, source_index in tiles_by_zoom:
             source_tile_counts[source_index] = source_tile_counts.get(source_index, 0) + num_tiles
+        source_labels = self._source_label_map(source_plans)
         if len(source_tile_counts) > 1:
-            source_labels = {0: "World overview", 1: "Region detail"}
             for si in sorted(source_tile_counts):
                 label = source_labels.get(si, f"Source {si}")
                 self.log(f"{label} tiles: {source_tile_counts[si]} (source {si})")
@@ -1310,7 +1733,6 @@ class SMPGenerator:
         if self.feedback and total_tiles > 0:
             self.feedback.setProgress(0)
 
-        source_labels = {0: "World overview", 1: "Region detail"}
         _current_source = [None]
 
         def iter_tile_tasks():
@@ -1375,7 +1797,7 @@ class SMPGenerator:
                         last_wait_log = now
                     continue
 
-                for future in done:
+                for future in sorted(done, key=lambda f: futures.get(f, (0, 0, 0, 0))[3]):
                     _done_tile = futures.pop(future, None)
                     future.result()
                     with progress_lock:
@@ -1749,7 +2171,6 @@ class SMPGenerator:
             0,  # External file attributes
             local_offset
         ) + arcname_bytes
-
 
     def _calculate_tile_extent(self, xtile, ytile, zoom):
         """

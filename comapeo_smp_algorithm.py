@@ -41,7 +41,23 @@ from qgis.core import (QgsProcessingAlgorithm,
                        QgsProcessingException,
                        QgsProject)
 
-from .comapeo_smp_generator import SMPGenerator
+from .comapeo_smp_generator import (
+    SMPGenerator,
+    SourceConfigError,
+    SOURCE_CONFIG_ERROR_REGION_LOCAL_OVERLAP,
+    SOURCE_CONFIG_ERROR_REGION_ZOOM_INVERTED,
+    SOURCE_CONFIG_ERROR_REGION_ZOOM_OUT_OF_RANGE,
+    SOURCE_CONFIG_ERROR_WORLD_LOCAL_OVERLAP,
+    SOURCE_CONFIG_ERROR_WORLD_REGION_OVERLAP,
+    SOURCE_CONFIG_ERROR_LOCAL_ZOOM_INVERTED,
+    SOURCE_CONFIG_ERROR_WORLD_MAX_ZOOM_NEGATIVE,
+    SOURCE_CONFIG_ERROR_WORLD_MAX_ZOOM_EXCEEDS_MAX,
+    SOURCE_CONFIG_ERROR_REGION_EXTENT_REQUIRED,
+    SOURCE_CONFIG_ERROR_REGION_ZOOMS_REQUIRED,
+    SOURCE_CONFIG_ERROR_REGION_CONTAINMENT,
+    SOURCE_CONFIG_ERROR_CRS_TRANSFORM,
+    WORLD_MAX_ZOOM_WARNING_THRESHOLD,
+)
 
 
 class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
@@ -71,6 +87,10 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
     OUTPUT_FILE = 'OUTPUT_FILE'
     INCLUDE_WORLD_BASE_ZOOMS = 'INCLUDE_WORLD_BASE_ZOOMS'
     WORLD_MAX_ZOOM = 'WORLD_MAX_ZOOM'
+    INCLUDE_REGION = 'INCLUDE_REGION'
+    REGION_EXTENT = 'REGION_EXTENT'
+    REGION_MIN_ZOOM = 'REGION_MIN_ZOOM'
+    REGION_MAX_ZOOM = 'REGION_MAX_ZOOM'
 
     # Tile format options presented to the user
     TILE_FORMAT_OPTIONS = ['PNG', 'JPG', 'WEBP']
@@ -87,6 +107,109 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
             if SMPGenerator.is_tile_format_supported(tile_format):
                 return cls.TILE_FORMAT_OPTIONS.index(tile_format)
         return cls.TILE_FORMAT_OPTIONS.index(SMPGenerator.TILE_FORMAT_PNG)
+
+    def _set_help(self, parameter, help_text):
+        """Set parameter help when supported by the QGIS runtime."""
+        if hasattr(parameter, 'setHelp'):
+            parameter.setHelp(self.tr(help_text))
+        return parameter
+
+    def _source_configuration_error_message(self, message, code=None):
+        """Return ``message`` enriched with a localized hint based on ``code``.
+
+        Matching is done by stable error code rather than English substrings
+        so non-English translations of ``message`` still pick up the hint.
+        """
+        if code == SOURCE_CONFIG_ERROR_REGION_LOCAL_OVERLAP:
+            return (
+                message + ' ' +
+                self.tr(
+                    'Increase Local maximum zoom or lower Region maximum zoom '
+                    'so there is room to separate the two sources.'
+                )
+            )
+        if code == SOURCE_CONFIG_ERROR_WORLD_REGION_OVERLAP:
+            return (
+                message + ' ' +
+                self.tr(
+                    'Region requires World maximum zoom < Region minimum zoom <= '
+                    'Region maximum zoom < Local minimum zoom.'
+                )
+            )
+        if code == SOURCE_CONFIG_ERROR_REGION_ZOOM_OUT_OF_RANGE:
+            return (
+                message + ' ' +
+                self.tr('Region zoom values must be between 0 and 24.')
+            )
+        if code == SOURCE_CONFIG_ERROR_REGION_ZOOM_INVERTED:
+            return (
+                message + ' ' +
+                self.tr(
+                    'Region minimum zoom must not exceed Region maximum zoom. '
+                    'Swap the values.'
+                )
+            )
+        if code == SOURCE_CONFIG_ERROR_WORLD_LOCAL_OVERLAP:
+            return (
+                message + ' ' +
+                self.tr(
+                    'Raise Local minimum zoom above World maximum zoom, or '
+                    'disable World coverage.'
+                )
+            )
+        if code == SOURCE_CONFIG_ERROR_LOCAL_ZOOM_INVERTED:
+            return (
+                message + ' ' +
+                self.tr(
+                    'Swap the Minimum and Maximum zoom level values so that '
+                    'Minimum does not exceed Maximum.'
+                )
+            )
+        if code == SOURCE_CONFIG_ERROR_WORLD_MAX_ZOOM_NEGATIVE:
+            return (
+                message + ' ' +
+                self.tr('Set World maximum zoom to 0 or higher.')
+            )
+        if code == SOURCE_CONFIG_ERROR_WORLD_MAX_ZOOM_EXCEEDS_MAX:
+            return (
+                message + ' ' +
+                self.tr(
+                    'Lower the World maximum zoom value to 24 or below.'
+                )
+            )
+        if code == SOURCE_CONFIG_ERROR_REGION_EXTENT_REQUIRED:
+            return (
+                message + ' ' +
+                self.tr(
+                    'Draw or select a Region extent before enabling the '
+                    'Region detail source.'
+                )
+            )
+        if code == SOURCE_CONFIG_ERROR_REGION_ZOOMS_REQUIRED:
+            return (
+                message + ' ' +
+                self.tr(
+                    'Set both Region minimum and maximum zoom levels before '
+                    'enabling the Region detail source.'
+                )
+            )
+        if code == SOURCE_CONFIG_ERROR_REGION_CONTAINMENT:
+            return (
+                message + ' ' +
+                self.tr(
+                    'Enlarge the Region extent so it fully covers the Local '
+                    'extent, or move the Local extent inside the Region.'
+                )
+            )
+        if code == SOURCE_CONFIG_ERROR_CRS_TRANSFORM:
+            return (
+                message + ' ' +
+                self.tr(
+                    'Verify that the project Coordinate Reference System is '
+                    'valid and supported by QGIS.'
+                )
+            )
+        return message
 
     def initAlgorithm(self, config):
         """
@@ -109,7 +232,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                 self.MIN_ZOOM,
                 self.tr('Minimum zoom level'),
                 QgsProcessingParameterNumber.Integer,
-                defaultValue=0,
+                defaultValue=8,
                 optional=False,
                 minValue=0,
                 maxValue=24
@@ -152,11 +275,10 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
         )
         self.addParameter(jpeg_quality_param)
 
-
         self.addParameter(
             QgsProcessingParameterBoolean(
                 self.INCLUDE_WORLD_BASE_ZOOMS,
-                self.tr('Include world tiles for low zoom levels'),
+                self.tr('Include World overview source'),
                 defaultValue=True,
                 optional=False
             )
@@ -165,12 +287,72 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
         self.addParameter(
             QgsProcessingParameterNumber(
                 self.WORLD_MAX_ZOOM,
-                self.tr('World low-zoom coverage (3-5)'),
+                self.tr('World maximum zoom'),
                 QgsProcessingParameterNumber.Integer,
                 defaultValue=3,
-                optional=False,
-                minValue=3,
-                maxValue=5
+                optional=True,
+                minValue=0,
+                maxValue=WORLD_MAX_ZOOM_WARNING_THRESHOLD + 2
+            )
+        )
+
+        self.addParameter(
+            self._set_help(
+                QgsProcessingParameterBoolean(
+                    self.INCLUDE_REGION,
+                    self.tr('Include Region detail source'),
+                    defaultValue=False,
+                    optional=False
+                ),
+                'Region requires World maximum zoom < Region minimum zoom <= '
+                'Region maximum zoom < Local minimum zoom. '
+                'Local minimum zoom will be automatically raised if it overlaps '
+                'with the Region range.'
+            )
+        )
+
+        self.addParameter(
+            self._set_help(
+                QgsProcessingParameterExtent(
+                    self.REGION_EXTENT,
+                    self.tr('Region extent'),
+                    optional=True
+                ),
+                'Required when Region is enabled. The Region extent must fully '
+                'contain the Local extent.'
+            )
+        )
+
+        self.addParameter(
+            self._set_help(
+                QgsProcessingParameterNumber(
+                    self.REGION_MIN_ZOOM,
+                    self.tr('Region minimum zoom level'),
+                    QgsProcessingParameterNumber.Integer,
+                    defaultValue=4,
+                    optional=True,
+                    minValue=0,
+                    maxValue=24
+                ),
+                'Only used when Include Region detail source is enabled. '
+                'Must be greater than World maximum zoom when World is enabled.'
+            )
+        )
+
+        self.addParameter(
+            self._set_help(
+                QgsProcessingParameterNumber(
+                    self.REGION_MAX_ZOOM,
+                    self.tr('Region maximum zoom level'),
+                    QgsProcessingParameterNumber.Integer,
+                    defaultValue=7,
+                    optional=True,
+                    minValue=0,
+                    maxValue=24
+                ),
+                'Only used when Include Region detail source is enabled. '
+                'Must be less than Local minimum zoom. '
+                'Local minimum zoom will be automatically raised if it overlaps.'
             )
         )
 
@@ -216,6 +398,41 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
             )
         )
 
+    def _region_extent_value(self, parameters, context):
+        """Return the optional Region extent or None when unset."""
+        region_extent = self.parameterAsExtent(parameters, self.REGION_EXTENT, context)
+        if region_extent is None or region_extent.isEmpty():
+            return None
+        return region_extent
+
+    def _source_configuration(self, parameters, context):
+        """Extract fixed world/region/local configuration from Processing parameters."""
+        include_world_base_zooms = self.parameterAsBool(
+            parameters, self.INCLUDE_WORLD_BASE_ZOOMS, context
+        )
+        include_region = self.parameterAsBool(parameters, self.INCLUDE_REGION, context)
+        world_max_zoom = (
+            self.parameterAsInt(parameters, self.WORLD_MAX_ZOOM, context)
+            if include_world_base_zooms else None
+        )
+        if world_max_zoom is None:
+            world_max_zoom = 3
+
+        return {
+            'include_world_base_zooms': include_world_base_zooms,
+            'world_max_zoom': world_max_zoom,
+            'include_region': include_region,
+            'region_extent': self._region_extent_value(parameters, context) if include_region else None,
+            'region_min_zoom': (
+                self.parameterAsInt(parameters, self.REGION_MIN_ZOOM, context)
+                if include_region else None
+            ),
+            'region_max_zoom': (
+                self.parameterAsInt(parameters, self.REGION_MAX_ZOOM, context)
+                if include_region else None
+            ),
+        }
+
     def checkParameterValues(self, parameters, context):
         """
         Pre-flight validation called when the user clicks Run in the Processing dialog.
@@ -237,48 +454,52 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                     min_zoom, max_zoom)
             )
 
-        include_world_base_zooms = self.parameterAsBool(
-            parameters, self.INCLUDE_WORLD_BASE_ZOOMS, context
-        )
-        world_max_zoom = self.parameterAsInt(parameters, self.WORLD_MAX_ZOOM, context)
-        if include_world_base_zooms and (world_max_zoom < 3 or world_max_zoom > 5):
-            return False, self.tr('World low-zoom coverage must be between 3 and 5.')
+        fixed_source_options = self._source_configuration(parameters, context)
 
         # Retrieve extent — if unset, let processAlgorithm handle it
         extent = self.parameterAsExtent(parameters, self.EXTENT, context)
         if extent is None or extent.isEmpty():
             return True, ''
 
-        # Tile format (needed for disk-space estimate)
-        tile_format_index = self.parameterAsEnum(parameters, self.TILE_FORMAT, context)
-        if not isinstance(tile_format_index, int):
-            return False, self.tr(
-                'Invalid tile format value: {}'.format(tile_format_index)
-            )
-        if tile_format_index < 0 or tile_format_index >= len(self.TILE_FORMAT_OPTIONS):
-            return False, self.tr(
-                'Invalid tile format index: {}'.format(tile_format_index)
-            )
-        tile_format = self.TILE_FORMAT_OPTIONS[tile_format_index]
-        try:
-            tile_format = SMPGenerator.validate_tile_format(tile_format)
-        except ValueError as exc:
-            return False, self.tr(str(exc))
-
-        # Instantiate generator without feedback (logs go to QgsMessageLog only)
+        # Tile format is only needed for disk-space estimation. Validate the
+        # fixed source model first so users see source/zoom errors before any
+        # unrelated output-format issues.
+        tile_format = None
         generator = SMPGenerator()
 
-        tile_count, _warning = generator.validate_tile_count(
-            extent,
-            min_zoom,
-            max_zoom,
-            include_world_base_zooms=include_world_base_zooms,
-            world_max_zoom=world_max_zoom
-        )
+        try:
+            export_plan = generator._build_export_plan(
+                extent,
+                min_zoom,
+                max_zoom,
+                **fixed_source_options
+            )
+        except SourceConfigError as exc:
+            return False, self._source_configuration_error_message(
+                self.tr(str(exc)), exc.code
+            )
+        except ValueError as exc:
+            return False, self._source_configuration_error_message(self.tr(str(exc)))
+
+        tile_count = export_plan['total_tiles']
 
         # Block if the output drive has insufficient space
         output_file = self.parameterAsFileOutput(parameters, self.OUTPUT_FILE, context)
         if output_file:
+            tile_format_index = self.parameterAsEnum(parameters, self.TILE_FORMAT, context)
+            if not isinstance(tile_format_index, int):
+                return False, self.tr(
+                    'Invalid tile format value: {}'.format(tile_format_index)
+                )
+            if tile_format_index < 0 or tile_format_index >= len(self.TILE_FORMAT_OPTIONS):
+                return False, self.tr(
+                    'Invalid tile format index: {}'.format(tile_format_index)
+                )
+            tile_format = self.TILE_FORMAT_OPTIONS[tile_format_index]
+            try:
+                tile_format = SMPGenerator.validate_tile_format(tile_format)
+            except ValueError as exc:
+                return False, self.tr(str(exc))
             try:
                 generator.validate_disk_space(output_file, tile_count, tile_format)
             except OSError as exc:
@@ -298,10 +519,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
         min_zoom = self.parameterAsInt(parameters, self.MIN_ZOOM, context)
         max_zoom = self.parameterAsInt(parameters, self.MAX_ZOOM, context)
 
-        include_world_base_zooms = self.parameterAsBool(
-            parameters, self.INCLUDE_WORLD_BASE_ZOOMS, context
-        )
-        world_max_zoom = self.parameterAsInt(parameters, self.WORLD_MAX_ZOOM, context)
+        fixed_source_options = self._source_configuration(parameters, context)
 
         # Get tile format
         tile_format_index = self.parameterAsEnum(parameters, self.TILE_FORMAT, context)
@@ -333,54 +551,90 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                 self.tr('Minimum zoom level must be less than or equal to maximum zoom level.')
             )
 
-        if include_world_base_zooms and (world_max_zoom < 3 or world_max_zoom > 5):
-            raise QgsProcessingException(
-                self.tr('World low-zoom coverage must be between 3 and 5.')
-            )
+        generator = SMPGenerator(feedback)
 
-        # Log the parameters for debugging
+        try:
+            export_plan = generator._build_export_plan(
+                extent,
+                min_zoom,
+                max_zoom,
+                **fixed_source_options
+            )
+        except SourceConfigError as exc:
+            raise QgsProcessingException(
+                self._source_configuration_error_message(
+                    self.tr(str(exc)), exc.code
+                )
+            )
+        except ValueError as exc:
+            raise QgsProcessingException(self.tr(str(exc)))
+
+        for warning in export_plan.get('warnings', []) or []:
+            feedback.pushWarning(self.tr(warning))
+
         feedback.pushInfo(
             self.tr('Using visible project layers in layer-tree order for rendering')
         )
-        feedback.pushInfo(self.tr(f'Extent: {extent.asWktPolygon()}'))
-        feedback.pushInfo(self.tr(f'Min zoom: {min_zoom}'))
-        feedback.pushInfo(self.tr(f'Max zoom: {max_zoom}'))
-        feedback.pushInfo(self.tr(f'Tile format: {tile_format}'))
-        feedback.pushInfo(self.tr(f'Include world base zooms: {include_world_base_zooms}'))
-        feedback.pushInfo(self.tr(f'World max zoom: {world_max_zoom}'))
+        feedback.pushInfo(self.tr('Extent: {}').format(extent.asWktPolygon()))
+        feedback.pushInfo(self.tr('Min zoom: {}').format(min_zoom))
+        feedback.pushInfo(self.tr('Max zoom: {}').format(max_zoom))
+        feedback.pushInfo(self.tr('Tile format: {}').format(tile_format))
+        feedback.pushInfo(self.tr('Include world source: {}').format(
+            fixed_source_options['include_world_base_zooms']))
+        if fixed_source_options['include_world_base_zooms']:
+            feedback.pushInfo(self.tr('World max zoom: {}').format(
+                fixed_source_options['world_max_zoom']))
+        feedback.pushInfo(self.tr('Include region source: {}').format(
+            fixed_source_options['include_region']))
+        if fixed_source_options['include_region'] and fixed_source_options['region_extent'] is not None:
+            feedback.pushInfo(
+                self.tr('Region extent: {}').format(
+                    fixed_source_options['region_extent'].asWktPolygon()
+                )
+            )
+            feedback.pushInfo(
+                self.tr('Region zoom range: {}-{}').format(
+                    fixed_source_options['region_min_zoom'],
+                    fixed_source_options['region_max_zoom'],
+                )
+            )
         if tile_format in ('JPG', 'WEBP'):
-            feedback.pushInfo(self.tr(f'{tile_format} quality: {jpeg_quality}'))
-        feedback.pushInfo(self.tr(f'Output file: {output_file}'))
+            feedback.pushInfo(self.tr('{} quality: {}').format(tile_format, jpeg_quality))
+        feedback.pushInfo(self.tr('Output file: {}').format(output_file))
 
-        generator = SMPGenerator(feedback)
-
-        export_plan = generator._build_export_plan(
-            extent,
-            min_zoom,
-            max_zoom,
-            include_world_base_zooms=include_world_base_zooms,
-            world_max_zoom=world_max_zoom
-        )
         estimated_tiles = export_plan['total_tiles']
         world_coverage_tiles = export_plan['world_coverage_tiles']
         estimated_bytes = generator.estimate_tile_storage_bytes(estimated_tiles, tile_format)
         estimated_mb = estimated_bytes / (1024 * 1024)
-        feedback.pushInfo(self.tr(f'Estimated tile count: {estimated_tiles:,}'))
-        feedback.pushInfo(self.tr(f'Estimated size: {estimated_mb:.1f} MB'))
+        feedback.pushInfo(self.tr('Estimated tile count: {:,}').format(estimated_tiles))
+        feedback.pushInfo(self.tr('Estimated size: {:.1f} MB').format(estimated_mb))
         feedback.pushInfo(
             self.tr(
-                f"Estimated world pyramid coverage: {export_plan['world_pct']:.2f}% "
-                f"({world_coverage_tiles:,}/{export_plan['world_tiles']:,} tiles)"
+                'Estimated world pyramid coverage: {:.2f}% ({:,}/{:,} tiles)'.format(
+                    export_plan['world_pct'],
+                    world_coverage_tiles,
+                    export_plan['world_tiles']
+                )
             )
         )
+        if export_plan['gap_zooms']:
+            feedback.pushWarning(
+                self.tr('No raster coverage will be generated for zoom levels: {}').format(
+                    ', '.join(str(zoom) for zoom in export_plan['gap_zooms'])
+                )
+            )
 
         # Generate the SMP file
         try:
             output_path = generator.generate_smp_from_canvas(
                 extent, min_zoom, max_zoom, output_file,
                 tile_format=tile_format, jpeg_quality=jpeg_quality,
-                include_world_base_zooms=include_world_base_zooms,
-                world_max_zoom=world_max_zoom,
+                include_world_base_zooms=fixed_source_options['include_world_base_zooms'],
+                world_max_zoom=fixed_source_options['world_max_zoom'],
+                include_region=fixed_source_options['include_region'],
+                region_extent=fixed_source_options['region_extent'],
+                region_min_zoom=fixed_source_options['region_min_zoom'],
+                region_max_zoom=fixed_source_options['region_max_zoom'],
                 export_plan=export_plan
             )
         except (ValueError, OSError) as exc:
@@ -431,6 +685,11 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
 
     def tr(self, string):
         return QCoreApplication.translate('Processing', string)
+
+    def createCustomParametersWidget(self, parent):
+        """Return a custom dialog with conditional parameter visibility."""
+        from .comapeo_smp_dialog import SmpAlgorithmDialog
+        return SmpAlgorithmDialog(self, parent=parent)
 
     def createInstance(self):
         return ComapeoMapBuilderAlgorithm()
