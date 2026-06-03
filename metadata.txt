@@ -6,7 +6,7 @@
 name=CoMapeo Map Builder
 qgisMinimumVersion=3.0
 description=Generates SMP files for CoMapeo using proper XYZ Web Mercator tiling
-version=0.8.0
+version=0.8.1
 author=Awana Digital
 email=luandro@awana.digital
 
@@ -20,6 +20,11 @@ repository=https://github.com/digidem/qgis-smp-plugin
 
 hasProcessingProvider=yes
 changelog=
+    0.8.1 - Fix blurry tiles: declare tileSize and render in EPSG:3857
+    * Add "tileSize": 256 to style.json sources so MapLibre stops upscaling tiles (fixes blur and clipped labels)
+    * Render tiles in EPSG:3857 (Web Mercator) instead of the project CRS to remove projection distortion and misalignment
+    * Validate the project->EPSG:3857 transform and fail with a clear message for unsupported CRSs
+    * Bump tile cache schema to 3 to discard tiles cached in the old project CRS
     0.8.0 - Fixed world/region/local SMP source model
     * Implement fixed-slot source model: world=s/0, region=s/1, local=s/2
     * Add optional Region detail source with extent and zoom bounds

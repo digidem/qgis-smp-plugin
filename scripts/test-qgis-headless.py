@@ -75,6 +75,9 @@ for lon, lat, name in [(-5, 5, "A"), (5, 5, "B"), (0, -5, "C")]:
     pr.addFeature(f)
 layer.updateExtents()
 QgsProject.instance().addMapLayer(layer)
+# Real QGIS projects always carry a CRS; set one explicitly so tile
+# rendering can build a valid project->EPSG:3857 transform (issue #16).
+QgsProject.instance().setCrs(QgsCoordinateReferenceSystem("EPSG:4326"))
 extent = layer.extent()
 gen = SMPGenerator()
 
@@ -88,6 +91,30 @@ try:
     check("WGS84 bounds has 4 floats", len(bounds) == 4)
     check("West < East", bounds[0] < bounds[2])
     check("South < North", bounds[1] < bounds[3])
+
+    # ------------------------------------------------------------------
+    print("\n--- Tile Render CRS = EPSG:3857 (issue #16) ---")
+
+    # With a UTM project CRS, tiles must still be rendered in EPSG:3857.
+    # _calculate_tile_extent must therefore return Web Mercator metres,
+    # independent of the project CRS — proven here with a real transform.
+    orig_crs = QgsProject.instance().crs()
+    QgsProject.instance().setCrs(QgsCoordinateReferenceSystem("EPSG:32723"))  # UTM 23S
+    try:
+        te = gen._calculate_tile_extent(0, 0, 0)  # whole-world tile
+        # EPSG:3857 world half-extent ≈ 20 037 508 m; UTM eastings are
+        # ~10^5–10^6 and degrees are <360, so the metre range is decisive.
+        x_ok = 1e6 < abs(te.xMinimum()) < 2.1e7 and 1e6 < abs(te.xMaximum()) < 2.1e7
+        y_ok = 1e6 < abs(te.yMinimum()) < 2.1e7 and 1e6 < abs(te.yMaximum()) < 2.1e7
+        check("Tile extent X in EPSG:3857 metre range (not UTM/degrees)", x_ok,
+              "got x [{}, {}]".format(te.xMinimum(), te.xMaximum()))
+        check("Tile extent Y in EPSG:3857 metre range", y_ok,
+              "got y [{}, {}]".format(te.yMinimum(), te.yMaximum()))
+        style_utm = gen._create_style_from_canvas(extent, 0, 10, 'PNG')
+        check("style source declares tileSize 256 under UTM project",
+              all(s.get('tileSize') == 256 for s in style_utm['sources'].values()))
+    finally:
+        QgsProject.instance().setCrs(orig_crs)
 
     # ------------------------------------------------------------------
     print("\n--- Tile Math ---")
