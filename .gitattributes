@@ -29,9 +29,13 @@ requirements.txt               export-ignore
 # Dev docs
 AGENTS.md                      export-ignore
 CLAUDE.md                      export-ignore
-CONTRIBUTING.md                export-ignore
-README.html                    export-ignore
-help/                          export-ignore
+CONTRIBUTING.md                 export-ignore
+README.html                     export-ignore
+XYZ_SMP.md                      export-ignore
+help/                           export-ignore
+
+# Agent tooling
+.forge/                         export-ignore
 
 # Working docs and plans
 docs/                          export-ignore
