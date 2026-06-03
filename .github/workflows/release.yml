@@ -101,7 +101,8 @@ jobs:
             XYZ_SMP.md README.html Makefile setup.cfg bandit.yaml pylintrc \
             pb_tool.cfg plugin_upload.py requirements.txt \
             generate_smp_from_xyz.sh install-dev.sh \
-            scripts/ test/ docs/ help/ .github/"
+            scripts/ test/ docs/ help/ .github/ \
+            plan-*.md research-*.md"
           for pattern in $DEV_FILES; do
             if zipinfo -1 "$ZIP" | grep -qE "^${FOLDER}/${pattern}(/|$)"; then
               echo "::error::Zip contains dev file: ${FOLDER}/${pattern}"
