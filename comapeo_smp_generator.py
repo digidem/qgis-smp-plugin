@@ -312,6 +312,11 @@ class SMPGenerator:
         :param feedback: Feedback object for progress reporting
         """
         self.feedback = feedback
+        # CRS objects are immutable and safe to share across the render
+        # thread pool.  Build them once per generator instead of on every
+        # _calculate_tile_extent call (one per tile).
+        self._wgs84_crs = QgsCoordinateReferenceSystem("EPSG:4326")
+        self._web_mercator_crs = QgsCoordinateReferenceSystem("EPSG:3857")
 
     def log(self, message, level=Qgis.Info):
         """
@@ -1677,13 +1682,13 @@ class SMPGenerator:
         # distortion and misaligns tile pixels against MapLibre's Mercator
         # base.  QGIS reprojects all layers from their source CRS to 3857 on
         # the fly during rendering.
-        web_mercator = QgsCoordinateReferenceSystem("EPSG:3857")
+        web_mercator = self._web_mercator_crs
         if not web_mercator.isValid():
-            raise RuntimeError("Could not construct the EPSG:3857 CRS")
+            raise ValueError("Could not construct the EPSG:3857 CRS")
         project_to_3857 = QgsCoordinateTransform(
             project.crs(), web_mercator, project)
         if not project_to_3857.isValid():
-            raise RuntimeError(
+            raise ValueError(
                 "Cannot reproject project CRS '{}' to EPSG:3857. Tiles must "
                 "be rendered in Web Mercator; use a project CRS that can "
                 "transform to EPSG:3857.".format(project.crs().authid()))
@@ -2213,9 +2218,13 @@ class SMPGenerator:
         # Transform to EPSG:3857 — the CRS tiles are rendered in (see
         # _generate_tiles_from_canvas).  The tile extent must match the render
         # CRS so each XYZ tile covers exactly its Web Mercator cell.
-        wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
-        web_mercator = QgsCoordinateReferenceSystem("EPSG:3857")
-        transform = QgsCoordinateTransform(wgs84, web_mercator, QgsProject.instance())
+        #
+        # Re-use the cached, immutable CRS objects (safe to share across the
+        # render thread pool).  The transform itself is built per call: this
+        # method runs concurrently in the worker pool and QgsCoordinateTransform
+        # is not safe to share between threads.
+        transform = QgsCoordinateTransform(
+            self._wgs84_crs, self._web_mercator_crs, QgsProject.instance())
 
         return transform.transformBoundingBox(wgs84_rect)
 

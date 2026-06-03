@@ -45,7 +45,11 @@ class _FakeRectangle:
 
 
 class _FakeCrs:
-    pass
+    def authid(self):
+        return 'EPSG:4326'
+
+    def isValid(self):
+        return True
 
 
 class _FakeProject:
@@ -1422,6 +1426,27 @@ class TestParallelTileRendering(unittest.TestCase):
                 )
             # img.save should have been called 4 times (2x2 tile grid)
             self.assertEqual(fake_img.save.call_count, 4)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestRenderCrsGuard(unittest.TestCase):
+    """The project->EPSG:3857 guard must raise ValueError so the Processing
+    algorithm (which catches ValueError/OSError) can surface a clean error
+    instead of an unhandled exception for unsupported project CRSs."""
+
+    def test_invalid_transform_raises_value_error(self):
+        import comapeo_smp_generator as _mod
+        gen = SMPGenerator()
+        invalid_tf = MagicMock()
+        invalid_tf.isValid.return_value = False
+        tmp = tempfile.mkdtemp()
+        try:
+            with patch.object(_mod, 'QgsProject', _FakeProject), \
+                 patch.object(_mod, 'QgsCoordinateTransform', return_value=invalid_tf):
+                with self.assertRaises(ValueError):
+                    gen._generate_tiles_from_canvas(
+                        _FakeRectangle(-1, -1, 1, 1), 0, 0, tmp, tile_format='PNG')
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
