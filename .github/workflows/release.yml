@@ -92,13 +92,19 @@ jobs:
           fi
           echo "No compiled files"
 
-          # 3. No dev-only files that should be export-ignored
-          DEV_FILES=".forge .claude .codex AGENTS.md CLAUDE.md Makefile setup.cfg \
-            bandit.yaml pylintrc pb_tool.cfg plugin_upload.py requirements.txt \
-            .pre-commit-config.yaml .flake8 TODO.md XYZ_SMP.md"
+          # 3. No dev-only files that should be export-ignored.
+          #    This list mirrors .gitattributes export-ignore entries.
+          #    Keep in sync with .gitattributes when adding/removing rules.
+          #    Patterns ending with '/' match directories; others match files.
+          DEV_FILES=".forge/ .claude/ .codex .flake8 .pre-commit-config.yaml \
+            .gitattributes .gitignore AGENTS.md CLAUDE.md CONTRIBUTING.md \
+            XYZ_SMP.md README.html Makefile setup.cfg bandit.yaml pylintrc \
+            pb_tool.cfg plugin_upload.py requirements.txt \
+            generate_smp_from_xyz.sh install-dev.sh \
+            scripts/ test/ docs/ help/ .github/"
           for pattern in $DEV_FILES; do
-            if zipinfo -1 "$ZIP" | grep -q "$FOLDER/$pattern"; then
-              echo "::error::Zip contains dev file: $FOLDER/$pattern"
+            if zipinfo -1 "$ZIP" | grep -qE "^${FOLDER}/${pattern}(/|$)"; then
+              echo "::error::Zip contains dev file: ${FOLDER}/${pattern}"
               exit 1
             fi
           done
@@ -115,13 +121,15 @@ jobs:
           # 5. Metadata links are present and look valid
           for field in tracker repository homepage; do
             URL=$(unzip -p "$ZIP" "$FOLDER/metadata.txt" | grep "^${field}=" | head -1 | cut -d'=' -f2-)
-            if [ -n "$URL" ]; then
-              if ! echo "$URL" | grep -qE '^https?://'; then
-                echo "::error::${field} URL is invalid: $URL"
-                exit 1
-              fi
-              echo "$field: $URL"
+            if [ -z "$URL" ]; then
+              echo "::warning::metadata.txt ${field} is missing"
+              continue
             fi
+            if ! echo "$URL" | grep -qE '^https?://'; then
+              echo "::error::${field} URL is invalid: $URL"
+              exit 1
+            fi
+            echo "$field: $URL"
           done
 
           echo "=== All validation checks passed ==="
