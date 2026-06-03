@@ -61,6 +61,71 @@ jobs:
           zipinfo -1 "comapeo_smp_v${VERSION}.zip" | head -20
           echo "Total files: $(zipinfo -1 "comapeo_smp_v${VERSION}.zip" | wc -l)"
 
+      - name: Validate plugin zip
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+          ZIP="comapeo_smp_v${VERSION}.zip"
+
+          echo "=== Validating plugin zip structure ==="
+
+          # 1. Top-level folder must exist and contain metadata.txt + __init__.py
+          TOP_DIR=$(zipinfo -1 "$ZIP" | grep -o '^[^/]*/' | sort -u)
+          if [ "$(echo "$TOP_DIR" | wc -l)" -ne 1 ]; then
+            echo "::error::Expected exactly one top-level directory, found: $TOP_DIR"
+            exit 1
+          fi
+          FOLDER=$(echo "$TOP_DIR" | tr -d '/')
+          echo "Top-level folder: $FOLDER"
+
+          for required in "$FOLDER/metadata.txt" "$FOLDER/__init__.py"; do
+            if ! zipinfo -1 "$ZIP" | grep -q "^$required$"; then
+              echo "::error::Missing required file: $required"
+              exit 1
+            fi
+          done
+          echo "metadata.txt and __init__.py present"
+
+          # 2. No compiled files
+          if zipinfo -1 "$ZIP" | grep -qE '__pycache__|\.pyc$'; then
+            echo "::error::Zip contains compiled Python files"
+            exit 1
+          fi
+          echo "No compiled files"
+
+          # 3. No dev-only files that should be export-ignored
+          DEV_FILES=".forge .claude .codex AGENTS.md CLAUDE.md Makefile setup.cfg \
+            bandit.yaml pylintrc pb_tool.cfg plugin_upload.py requirements.txt \
+            .pre-commit-config.yaml .flake8 TODO.md XYZ_SMP.md"
+          for pattern in $DEV_FILES; do
+            if zipinfo -1 "$ZIP" | grep -q "$FOLDER/$pattern"; then
+              echo "::error::Zip contains dev file: $FOLDER/$pattern"
+              exit 1
+            fi
+          done
+          echo "No dev-only files"
+
+          # 4. description field is non-empty in metadata.txt
+          DESC=$(unzip -p "$ZIP" "$FOLDER/metadata.txt" | grep '^description=' | head -1 | cut -d'=' -f2-)
+          if [ -z "$DESC" ]; then
+            echo "::error::metadata.txt description is empty"
+            exit 1
+          fi
+          echo "Description: $DESC"
+
+          # 5. Metadata links are present and look valid
+          for field in tracker repository homepage; do
+            URL=$(unzip -p "$ZIP" "$FOLDER/metadata.txt" | grep "^${field}=" | head -1 | cut -d'=' -f2-)
+            if [ -n "$URL" ]; then
+              if ! echo "$URL" | grep -qE '^https?://'; then
+                echo "::error::${field} URL is invalid: $URL"
+                exit 1
+              fi
+              echo "$field: $URL"
+            fi
+          done
+
+          echo "=== All validation checks passed ==="
+
       - name: Upload artifact
         uses: actions/upload-artifact@v5
         with:
