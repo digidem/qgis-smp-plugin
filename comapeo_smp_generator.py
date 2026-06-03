@@ -156,9 +156,12 @@ class TileCache:
             try:
                 with open(path) as fh:
                     data = json.load(fh)
-                # Schema migration: discard old-format caches that lack
-                # source_index in their keys.
-                if data.get('schema_version', 0) < 2:
+                # Schema migration: discard caches from older versions.
+                #   v2: added source_index to tile keys.
+                #   v3: tiles now rendered in EPSG:3857 (was project CRS), so
+                #       tiles cached before the fix have stale pixel content
+                #       even though their fingerprint still matches.
+                if data.get('schema_version', 0) < 3:
                     return {}
                 return data
             except (json.JSONDecodeError, OSError):
@@ -174,7 +177,7 @@ class TileCache:
         try:
             with open(tmp_path, 'w') as fh:
                 meta = dict(self._state['meta'])
-                meta['schema_version'] = 2
+                meta['schema_version'] = 3
                 json.dump(meta, fh)
             os.replace(tmp_path, self._meta_path)
         except Exception:
@@ -309,6 +312,11 @@ class SMPGenerator:
         :param feedback: Feedback object for progress reporting
         """
         self.feedback = feedback
+        # CRS objects are immutable and safe to share across the render
+        # thread pool.  Build them once per generator instead of on every
+        # _calculate_tile_extent call (one per tile).
+        self._wgs84_crs = QgsCoordinateReferenceSystem("EPSG:4326")
+        self._web_mercator_crs = QgsCoordinateReferenceSystem("EPSG:3857")
 
     def log(self, message, level=Qgis.Info):
         """
@@ -1384,6 +1392,7 @@ class SMPGenerator:
                 "name": source_name,
                 "version": "2.0",
                 "type": "raster",
+                "tileSize": 256,
                 "minzoom": export_zooms[0],
                 "maxzoom": export_zooms[-1],
                 "scheme": "xyz",
@@ -1665,9 +1674,26 @@ class SMPGenerator:
         # Get the current project
         project = QgsProject.instance()
 
-        # Create map settings for rendering
+        # Create map settings for rendering.
+        #
+        # Tiles must be rendered in EPSG:3857 (Web Mercator) — the projection
+        # MapLibre uses to display XYZ tiles.  Rendering in the project CRS
+        # (often a UTM zone for field projects) introduces projection
+        # distortion and misaligns tile pixels against MapLibre's Mercator
+        # base.  QGIS reprojects all layers from their source CRS to 3857 on
+        # the fly during rendering.
+        web_mercator = self._web_mercator_crs
+        if not web_mercator.isValid():
+            raise ValueError("Could not construct the EPSG:3857 CRS")
+        project_to_3857 = QgsCoordinateTransform(
+            project.crs(), web_mercator, project)
+        if not project_to_3857.isValid():
+            raise ValueError(
+                "Cannot reproject project CRS '{}' to EPSG:3857. Tiles must "
+                "be rendered in Web Mercator; use a project CRS that can "
+                "transform to EPSG:3857.".format(project.crs().authid()))
         map_settings = QgsMapSettings()
-        map_settings.setDestinationCrs(project.crs())
+        map_settings.setDestinationCrs(web_mercator)
 
         # Add visible layers in layer-tree order (matches what users see in the
         # QGIS layer panel) so that rendering is deterministic across Processing
@@ -2179,7 +2205,7 @@ class SMPGenerator:
         :param xtile: Tile X coordinate
         :param ytile: Tile Y coordinate
         :param zoom: Zoom level
-        :return: QgsRectangle in project CRS
+        :return: QgsRectangle in EPSG:3857
         """
         # Get WGS84 bounds for this tile (NW corner)
         north, west = self._num2deg(xtile, ytile, zoom)
@@ -2189,10 +2215,16 @@ class SMPGenerator:
         # Create rectangle in WGS84
         wgs84_rect = QgsRectangle(west, south, east, north)
 
-        # Transform to project CRS
-        wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
-        project_crs = QgsProject.instance().crs()
-        transform = QgsCoordinateTransform(wgs84, project_crs, QgsProject.instance())
+        # Transform to EPSG:3857 — the CRS tiles are rendered in (see
+        # _generate_tiles_from_canvas).  The tile extent must match the render
+        # CRS so each XYZ tile covers exactly its Web Mercator cell.
+        #
+        # Re-use the cached, immutable CRS objects (safe to share across the
+        # render thread pool).  The transform itself is built per call: this
+        # method runs concurrently in the worker pool and QgsCoordinateTransform
+        # is not safe to share between threads.
+        transform = QgsCoordinateTransform(
+            self._wgs84_crs, self._web_mercator_crs, QgsProject.instance())
 
         return transform.transformBoundingBox(wgs84_rect)
 
