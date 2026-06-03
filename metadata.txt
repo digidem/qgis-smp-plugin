@@ -20,12 +20,11 @@ repository=https://github.com/digidem/qgis-smp-plugin
 
 hasProcessingProvider=yes
 changelog=
-    0.8.1 - Fix blurry tiles: declare tileSize and render in EPSG:3857
+    0.8.1 - Fix blurry tiles, fixed world/region/local source model, MIT license
     * Add "tileSize": 256 to style.json sources so MapLibre stops upscaling tiles (fixes blur and clipped labels)
     * Render tiles in EPSG:3857 (Web Mercator) instead of the project CRS to remove projection distortion and misalignment
     * Validate the project->EPSG:3857 transform and fail with a clear message for unsupported CRSs
     * Bump tile cache schema to 3 to discard tiles cached in the old project CRS
-    0.8.0 - Fixed world/region/local SMP source model
     * Implement fixed-slot source model: world=s/0, region=s/1, local=s/2
     * Add optional Region detail source with extent and zoom bounds
     * Add CRS transform error handling in validation (user-facing message)
@@ -35,6 +34,7 @@ changelog=
     * Local-only exports preserve legacy mbtiles-source/s/0 for backward compat
     * World base zooms enabled by default for backward compatibility
     * Mark research docs as speculative/not-implemented
+    * Replace GPL-2 license with MIT license for Awana Digital
     0.7.1 - UX improvements, CI hardening & docs updates
     * Default output path now uses project directory (saved) or OS Documents folder (unsaved)
     * Add multi-source progress logging for better feedback during generation
