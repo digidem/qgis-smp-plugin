@@ -90,6 +90,16 @@ default:
 	@echo You can install pb_tool using: pip install pb_tool
 	@echo See https://g-sherman.github.io/plugin_build_tool/ for info. 
 
+# Vendor the styled-map-package library at a pinned release tag.
+#   make vendor                 # re-vendor the version recorded in .smp-version
+#   make vendor VERSION=v1.2.0   # update to a new release and re-pin
+vendor:
+	bash scripts/vendor-smp.sh $(VERSION)
+
+# Fail if the committed styled_map_package/ has drifted from its pinned release.
+vendor-check:
+	bash scripts/vendor-check.sh
+
 # Reliable QGIS-free logic tests — this is the default `make test` path.
 test: test-logic
 

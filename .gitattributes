@@ -3,6 +3,7 @@
 generate_smp_from_xyz.sh       export-ignore
 install-dev.sh                 export-ignore
 scripts/                       export-ignore
+.smp-version                   export-ignore
 
 # Test and CI
 test/                          export-ignore
