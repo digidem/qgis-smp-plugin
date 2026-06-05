@@ -27,17 +27,37 @@ FILES=(
     metadata.txt
 )
 
+# Vendored pure-Python packages (directories) deployed alongside the modules.
+DIRS=(
+    styled_map_package
+)
+
+copy_all() {
+    for f in "${FILES[@]}"; do
+        src="${SCRIPT_DIR}/${f}"
+        if [ -f "${src}" ]; then
+            cp -v "${src}" "${DEST}/"
+        else
+            echo "  WARNING: ${f} not found, skipping"
+        fi
+    done
+    for d in "${DIRS[@]}"; do
+        src="${SCRIPT_DIR}/${d}"
+        if [ -d "${src}" ]; then
+            rm -rf "${DEST}/${d}"
+            cp -R "${src}" "${DEST}/"
+            rm -rf "${DEST}/${d}/__pycache__"
+            echo "  ${d}/"
+        else
+            echo "  WARNING: ${d}/ not found, skipping"
+        fi
+    done
+}
+
 echo "Installing ${PLUGIN_NAME} → ${DEST}"
 mkdir -p "${DEST}"
 
-for f in "${FILES[@]}"; do
-    src="${SCRIPT_DIR}/${f}"
-    if [ -f "${src}" ]; then
-        cp -v "${src}" "${DEST}/"
-    else
-        echo "  WARNING: ${f} not found, skipping"
-    fi
-done
+copy_all
 
 echo ""
 echo "Done. To activate changes in QGIS:"
@@ -54,10 +74,7 @@ if [ "${1}" = "--watch" ]; then
     echo "Watching for changes... (Ctrl+C to stop)"
     while inotifywait -q -e modify,close_write "${SCRIPT_DIR}"/*.py "${SCRIPT_DIR}/metadata.txt" 2>/dev/null; do
         echo "Change detected, reinstalling..."
-        for f in "${FILES[@]}"; do
-            src="${SCRIPT_DIR}/${f}"
-            [ -f "${src}" ] && cp -v "${src}" "${DEST}/"
-        done
+        copy_all
         echo "Done. Reload in QGIS."
     done
 fi

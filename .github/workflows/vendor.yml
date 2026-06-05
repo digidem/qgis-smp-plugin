@@ -1,0 +1,17 @@
+name: Vendor check
+
+# Ensures the committed styled_map_package/ matches the styled-map-package-python
+# release recorded in .smp-version, so the vendored copy cannot silently drift.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  vendor-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check vendored styled-map-package is in sync
+        run: make vendor-check

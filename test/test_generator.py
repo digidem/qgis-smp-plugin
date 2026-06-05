@@ -3811,100 +3811,6 @@ class TestTileDeduplication(unittest.TestCase):
             style = json.loads(zf.read('style.json'))
             self.assertEqual(style['version'], 8)
 
-    def test_cancel_during_dedup_phase1_returns_false(self):
-        """Phase 1 cancellation must return False without creating the output file.
-
-        isCanceled() call breakdown for 4 identical tiles (1 unique hash),
-        when calling _build_smp_archive (the wrapper):
-          Wrapper os.walk: 1 call at line 1150 (before loop) +
-                          4 calls at line 1153 (one per tile found)
-                          = 5 wrapper calls (all False to reach dedup)
-          Phase 1 hashing: 4 calls (one per tile)
-          Total to cancel in Phase 1 after 2 tiles: 5 + 2 = 7 False, then True
-
-        This test cancels after 2 Phase-1 hashing calls (8th overall returns True).
-        Because Phase 1 is cancelled, the output file is never created.
-        """
-        gen = SMPGenerator()
-        import json
-        style_path = os.path.join(self.tmp, 'style_p1.json')
-        with open(style_path, 'w') as f:
-            json.dump({"version": 8, "sources": {}, "layers": []}, f)
-
-        tiles_dir = os.path.join(self.tmp, 'tiles_p1')
-        identical_content = b'\x89PNG\r\n\x1a\n' + b'\x00' * 100
-        for z, x, y in [(0, 0, 0), (1, 0, 0), (1, 0, 1), (1, 1, 0)]:
-            d = os.path.join(tiles_dir, '0', str(z), str(x))
-            os.makedirs(d, exist_ok=True)
-            with open(os.path.join(d, f'{y}.png'), 'wb') as f:
-                f.write(identical_content)
-
-        out_path = os.path.join(self.tmp, 'cancel_p1.smp')
-
-        feedback = MagicMock()
-        # 5 wrapper calls (all False) + 2 Phase-1 calls (False) + True (cancel on 3rd Phase-1)
-        feedback.isCanceled.side_effect = [False] * 7 + [True]
-        gen.feedback = feedback
-
-        result = gen._build_smp_archive(
-            style_path=style_path,
-            tiles_dir=tiles_dir,
-            output_path=out_path,
-            dedup=True
-        )
-        self.assertFalse(result)
-        self.assertFalse(os.path.exists(out_path),
-                         "Output file must not be created when Phase 1 is cancelled")
-
-    def test_cancel_during_dedup_phase2_returns_false(self):
-        """Phase 2 cancellation must return False and clean up the partial output file.
-
-        isCanceled() call breakdown for 4 identical tiles (1 unique hash),
-        when calling _build_smp_archive (the wrapper):
-          Wrapper os.walk: 1 call at line 1150 (before loop) +
-                          4 calls at line 1153 (one per tile found)
-                          = 5 wrapper calls (all False to reach dedup)
-          Phase 1 hashing: 4 calls -> all False (Phase 1 completes)
-          Phase 2 tile-writing: 1 call  -> False (unique tile is written)
-          Phase 2 CD writing: True on first CD write iteration
-          Total: 5 + 4 + 1 + 1 = 11 values, cancels at call 11
-
-        side_effect = [False]*10 + [True]
-        """
-        gen = SMPGenerator()
-        import json
-        style_path = os.path.join(self.tmp, 'style_p2.json')
-        with open(style_path, 'w') as f:
-            json.dump({"version": 8, "sources": {}, "layers": []}, f)
-
-        tiles_dir = os.path.join(self.tmp, 'tiles_p2')
-        identical_content = b'\x89PNG\r\n\x1a\n' + b'\x00' * 100
-        for z, x, y in [(0, 0, 0), (1, 0, 0), (1, 0, 1), (1, 1, 0)]:
-            d = os.path.join(tiles_dir, '0', str(z), str(x))
-            os.makedirs(d, exist_ok=True)
-            with open(os.path.join(d, f'{y}.png'), 'wb') as f:
-                f.write(identical_content)
-
-        out_path = os.path.join(self.tmp, 'cancel_p2.smp')
-
-        feedback = MagicMock()
-        # Wrapper calls: 5 (all False to reach dedup)
-        # Phase 1 hashing: 4 calls (all False, completes)
-        # Phase 2 tile-writing: 1 call (False, unique tile written)
-        # Phase 2 CD writing: True on first CD entry
-        feedback.isCanceled.side_effect = [False] * 5 + [False] * 4 + [False] + [True]
-        gen.feedback = feedback
-
-        result = gen._build_smp_archive(
-            style_path=style_path,
-            tiles_dir=tiles_dir,
-            output_path=out_path,
-            dedup=True
-        )
-        self.assertFalse(result)
-        self.assertFalse(os.path.exists(out_path),
-                         "Partial output file must be cleaned up on Phase 2 cancellation")
-
     def test_dedup_succeeds_with_feedback_none(self):
         """Dedup must work correctly when feedback is None (no cancellation support)."""
         import zipfile as _zipfile
@@ -3937,108 +3843,6 @@ class TestTileDeduplication(unittest.TestCase):
             names = set(zf.namelist())
         self.assertIn('s/0/0/0/0.png', names)
         self.assertIn('s/0/1/0/0.png', names)
-
-    def test_dedup_error_cleans_up_partial_file(self):
-        """An OSError during Phase 2 must delete the partial output file and re-raise."""
-        from unittest.mock import patch as _patch
-        gen = SMPGenerator()
-        import json
-        style_path = os.path.join(self.tmp, 'style_err.json')
-        with open(style_path, 'w') as f:
-            json.dump({"version": 8, "sources": {}, "layers": []}, f)
-
-        tiles_dir = os.path.join(self.tmp, 'tiles_err')
-        for z, x, y in [(0, 0, 0), (1, 0, 0)]:
-            d = os.path.join(tiles_dir, '0', str(z), str(x))
-            os.makedirs(d, exist_ok=True)
-            with open(os.path.join(d, f'{y}.png'), 'wb') as f:
-                f.write(b'\x89PNG unique_' + str(z).encode())
-
-        out_path = os.path.join(self.tmp, 'error_cleanup.smp')
-
-        # Make the tile file unreadable during Phase 2 to trigger OSError.
-        # Phase 1 reads succeed (for hashing). We patch open() so that the
-        # second open of the tile file (Phase 2 re-read) raises OSError.
-        real_open = open
-        call_counts = {}
-
-        def patched_open(path, mode='r', **kwargs):
-            if mode == 'rb' and path not in (style_path,):
-                count = call_counts.get(path, 0) + 1
-                call_counts[path] = count
-                if count > 1:  # second open of same tile = Phase 2 re-read
-                    raise OSError(f"Simulated read error for {path}")
-            return real_open(path, mode, **kwargs)
-
-        with _patch('builtins.open', side_effect=patched_open):
-            with self.assertRaises(OSError):
-                gen._build_smp_archive(
-                    style_path=style_path,
-                    tiles_dir=tiles_dir,
-                    output_path=out_path,
-                    dedup=True
-                )
-
-        self.assertFalse(os.path.exists(out_path),
-                         "Partial output file must be removed after OSError in Phase 2")
-
-    def test_dedup_raises_on_too_many_entries(self):
-        """Building an archive with >=65535 total entries must raise ValueError.
-
-        We create 3 real files with distinct content and build a tile_entries list
-        of 65,534 items (same files reused with unique arcnames). Combined with
-        style.json and VERSION, that totals 65,536 central directory entries --
-        exceeding the 65,534 limit (65,535 is the ZIP64 magic marker).
-
-        Phase 1 deduplicates to 3 unique hashes. Phase 2 writes 3 tile files.
-        The CD building loop creates 65,536 in-memory entries, then the guard fires
-        before any CD data is written to disk. The except handler cleans up.
-        """
-        gen = SMPGenerator()
-        import json
-        style_path = os.path.join(self.tmp, 'style_overflow.json')
-        with open(style_path, 'w') as f:
-            json.dump({"version": 8, "sources": {}, "layers": []}, f)
-
-        # 3 real files with distinct content
-        real_files = []
-        for i in range(3):
-            p = os.path.join(self.tmp, f'real_tile_{i}.png')
-            with open(p, 'wb') as f:
-                f.write(bytes([i]))
-            real_files.append(p)
-
-        # 65,534 tile_entries (same files cycled, unique arcnames)
-        tile_entries = [
-            (real_files[i % 3], f's/0/0/0/tile_{i}.png')
-            for i in range(65534)
-        ]
-
-        out_path = os.path.join(self.tmp, 'overflow.smp')
-        with self.assertRaises(ValueError) as ctx:
-            gen._build_smp_archive_dedup(style_path, tile_entries, out_path)
-
-        self.assertIn('65535', str(ctx.exception))
-        self.assertFalse(os.path.exists(out_path),
-                         "Output file must be cleaned up after entry-count ValueError")
-
-    def test_check_zip32_limit_raises_on_overflow(self):
-        """_check_zip32_limit must raise ValueError when file position exceeds 4 GiB."""
-        mock_file = MagicMock()
-        mock_file.tell.return_value = 0x100000000  # 4 GiB + 1 byte
-
-        with self.assertRaises(ValueError) as ctx:
-            SMPGenerator._check_zip32_limit(mock_file)
-
-        self.assertIn('4 GB', str(ctx.exception))
-
-    def test_check_zip32_limit_passes_at_boundary(self):
-        """_check_zip32_limit must not raise when file position is exactly at the limit."""
-        mock_file = MagicMock()
-        mock_file.tell.return_value = 0xFFFFFFFF  # exactly 4 GiB - 1 byte, OK
-
-        # Should not raise
-        SMPGenerator._check_zip32_limit(mock_file)
 
     def test_dedup_with_tile_paths_filtering(self):
         """tile_paths filtering and dedup must compose correctly.
@@ -4108,33 +3912,57 @@ class TestTileDeduplication(unittest.TestCase):
         )
         self.assertLess(os.path.getsize(out_dedup), os.path.getsize(out_no_dedup))
 
-    def test_dedup_return_value_propagated(self):
-        """_build_smp_archive must propagate _build_smp_archive_dedup's return value."""
-        from unittest.mock import patch as _patch
+    def test_cancel_during_walk_returns_false_with_dedup(self):
+        """Cancelling during the tile walk (dedup on) returns False, leaves no output."""
         gen = SMPGenerator()
         import json
-        style_path = os.path.join(self.tmp, 'style_prop.json')
+        style_path = os.path.join(self.tmp, 'style_cancel.json')
         with open(style_path, 'w') as f:
             json.dump({"version": 8, "sources": {}, "layers": []}, f)
-
-        tiles_dir = os.path.join(self.tmp, 'tiles_prop')
-        d = os.path.join(tiles_dir, '0', '0')
+        tiles_dir = os.path.join(self.tmp, 'tiles_cancel')
+        d = os.path.join(tiles_dir, '0', '0', '0')
         os.makedirs(d, exist_ok=True)
         with open(os.path.join(d, '0.png'), 'wb') as f:
             f.write(b'\x89PNG')
+        out_path = os.path.join(self.tmp, 'cancelled.smp')
+        feedback = MagicMock()
+        # pre-walk check False, then per-file check True -> cancel before writing.
+        feedback.isCanceled.side_effect = [False, True]
+        gen.feedback = feedback
+        result = gen._build_smp_archive(
+            style_path=style_path, tiles_dir=tiles_dir,
+            output_path=out_path, dedup=True)
+        self.assertFalse(result)
+        self.assertFalse(os.path.exists(out_path))
 
-        out_path = os.path.join(self.tmp, 'propagate.smp')
+    def test_archive_error_cleans_up_partial_file(self):
+        """An error while writing the archive must delete the partial output and re-raise."""
+        from unittest.mock import patch as _patch
+        import comapeo_smp_generator as _mod
+        gen = SMPGenerator()
+        import json
+        style_path = os.path.join(self.tmp, 'style_err.json')
+        with open(style_path, 'w') as f:
+            json.dump({"version": 8, "sources": {}, "layers": []}, f)
+        tiles_dir = os.path.join(self.tmp, 'tiles_err')
+        d = os.path.join(tiles_dir, '0', '0', '0')
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, '0.png'), 'wb') as f:
+            f.write(b'\x89PNG')
+        out_path = os.path.join(self.tmp, 'error_cleanup.smp')
 
-        with _patch.object(gen, '_build_smp_archive_dedup', return_value=False) as mock_dedup:
-            result = gen._build_smp_archive(
-                style_path=style_path,
-                tiles_dir=tiles_dir,
-                output_path=out_path,
-                dedup=True
-            )
+        def boom(dest, entries, **kwargs):
+            with open(dest, 'wb') as fh:
+                fh.write(b'partial')  # simulate a partially written archive
+            raise OSError("Simulated write error")
 
-        self.assertFalse(result, "_build_smp_archive must return False when dedup returns False")
-        mock_dedup.assert_called_once()
+        with _patch.object(_mod, 'write_smp_archive', side_effect=boom):
+            with self.assertRaises(OSError):
+                gen._build_smp_archive(
+                    style_path=style_path, tiles_dir=tiles_dir,
+                    output_path=out_path, dedup=True)
+        self.assertFalse(os.path.exists(out_path),
+                         "Partial output file must be removed after a write error")
 
 
 class TestSMPValidation(unittest.TestCase):
