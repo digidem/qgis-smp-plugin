@@ -68,16 +68,63 @@ produce vector tiles, glyphs, or sprite assets.
    - **Output SMP file**: The location to save the SMP file
 6. Click "Run" to generate the SMP file
 
-When **Include World overview source** is enabled, zoom levels `0..WORLD_MAX_ZOOM`
-are exported as full-world tiles on source slot `s/0`. When **Include Region detail
-source** is enabled, it occupies source slot `s/1` for its configured zoom range.
-With the defaults (`MIN_ZOOM=4`, `WORLD_MAX_ZOOM=3`, Region `6..9`), enable
-Region only after either raising **Minimum zoom level** to `10` or lowering
-**Region maximum zoom level** below the Local minimum zoom.
-If both World and Region are disabled, the selected Local extent uses the legacy
-single-source contract on source slot `s/0` with source id `mbtiles-source`.
-When either World or Region is enabled, the selected Local extent renders on source
-slot `s/2`, above the optional World and Region sources.
+### How World / Region / Local Sources Work
+
+The plugin can produce up to three separate tile sources inside a single SMP
+file. Each source covers a different zoom range and geographic area, so
+CoMapeo can show the right level of detail as the user zooms in and out.
+
+```
+ Zoom 0 ────────────────────────────────────────────── Zoom 24
+  ┌──────────┐┌───────────────┐┌──────────────────────┐
+  │   World   ││    Region     ││       Local          │
+  │ Overview  ││    Detail     ││      Detail          │
+  │  (s/0)    ││    (s/1)      ││      (s/2)           │
+  └──────────┘└───────────────┘└──────────────────────┘
+   zoom 0–3     zoom 4–7        zoom 8–14
+   (whole       (country/       (your project
+    world)       province)       area)
+```
+
+**World Overview** (`s/0`) renders the entire globe at very low zoom levels
+(0–3 by default). This gives users a recognizable world map when they zoom
+out, so they can orient themselves before diving into higher-detail areas.
+Enable it with the **Include World overview source** checkbox.
+
+**Region Detail** (`s/1`) is an optional middle layer. It covers a larger
+area than your project (for example, a province or watershed) at medium
+zoom levels (4–7 by default). This provides a smooth visual transition
+between the world overview and your detailed local area. Enable it with the
+**Include Region detail source** checkbox, then draw a Region extent that
+fully contains your Local extent and set the Region zoom range.
+
+**Local Detail** (`s/2`) is your main project area — the extent you draw in
+the dialog — rendered at the highest zoom levels (8–14 by default). This is
+always generated. When World and Region are both disabled, Local uses the
+legacy single-source slot (`s/0`) for backward compatibility.
+
+The zoom ranges must be strictly ordered so they don't overlap:
+
+```
+World max zoom < Region min zoom <= Region max zoom < Local min zoom
+```
+
+If your ranges would overlap, the plugin will either automatically adjust
+the Local minimum zoom or show a clear error explaining what to change.
+
+**Typical setup for a field project:**
+
+| Source | Extent | Zoom range | Purpose |
+|--------|--------|------------|----------|
+| World | Entire globe | 0 – 3 | Show continents and oceans when zoomed out |
+| Region | Province or territory | 4 – 7 | Show roads and rivers at medium zoom |
+| Local | Your project site | 8 – 14 | Show detailed field data at high zoom |
+
+**Simplest setup (World + Local only):**
+
+Leave **Include Region detail source** unchecked. Set **World maximum zoom**
+to 3 and **Minimum zoom level** (Local) to 4 or higher. The plugin fills the
+gap automatically.
 
 The plugin renders visible project layers in QGIS layer-tree order, and uses
 custom layer order when that project setting is enabled.
@@ -145,7 +192,7 @@ make test-legacy
 
 ## License
 
-This plugin is licensed under the GNU General Public License v2.0 or later.
+This plugin is licensed under the MIT License.
 
 ## Credits
 

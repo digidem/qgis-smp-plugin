@@ -45,7 +45,11 @@ class _FakeRectangle:
 
 
 class _FakeCrs:
-    pass
+    def authid(self):
+        return 'EPSG:4326'
+
+    def isValid(self):
+        return True
 
 
 class _FakeProject:
@@ -82,6 +86,9 @@ class _FakeTransform:
     def transformBoundingBox(self, rect):
         # Return the same rectangle (pretend project CRS == WGS84 for tests)
         return rect
+
+    def isValid(self):
+        return True
 
 
 # Patch the qgis modules before importing the generator
@@ -1003,6 +1010,24 @@ class TestCreateStyleJson(unittest.TestCase):
         self.assertIn('bounds', source)
         self.assertEqual(len(source['bounds']), 4)
 
+    def test_style_source_declares_tile_size_256(self):
+        # MapLibre's raster source defaults to tileSize 512.  The plugin
+        # renders 256px tiles, so every source must declare tileSize:256 or
+        # MapLibre displays zoom N-1 content at zoom N (blurry, clipped
+        # labels).  Regression guard for issue #16.
+        style = self.gen._create_style_from_canvas(self._make_extent(), 0, 10)
+        self.assertTrue(style['sources'])
+        for source in style['sources'].values():
+            self.assertEqual(source['tileSize'], 256)
+
+    def test_multi_source_styles_declare_tile_size_256(self):
+        style = self.gen._create_style_from_canvas(
+            self._make_extent(), 6, 12,
+            include_world_base_zooms=True, world_max_zoom=3)
+        self.assertGreaterEqual(len(style['sources']), 2)
+        for source in style['sources'].values():
+            self.assertEqual(source['tileSize'], 256)
+
     def test_style_zoom_levels(self):
         style = self.gen._create_style_from_canvas(self._make_extent(), 3, 15)
         source = list(style['sources'].values())[0]
@@ -1401,6 +1426,27 @@ class TestParallelTileRendering(unittest.TestCase):
                 )
             # img.save should have been called 4 times (2x2 tile grid)
             self.assertEqual(fake_img.save.call_count, 4)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestRenderCrsGuard(unittest.TestCase):
+    """The project->EPSG:3857 guard must raise ValueError so the Processing
+    algorithm (which catches ValueError/OSError) can surface a clean error
+    instead of an unhandled exception for unsupported project CRSs."""
+
+    def test_invalid_transform_raises_value_error(self):
+        import comapeo_smp_generator as _mod
+        gen = SMPGenerator()
+        invalid_tf = MagicMock()
+        invalid_tf.isValid.return_value = False
+        tmp = tempfile.mkdtemp()
+        try:
+            with patch.object(_mod, 'QgsProject', _FakeProject), \
+                 patch.object(_mod, 'QgsCoordinateTransform', return_value=invalid_tf):
+                with self.assertRaises(ValueError):
+                    gen._generate_tiles_from_canvas(
+                        _FakeRectangle(-1, -1, 1, 1), 0, 0, tmp, tile_format='PNG')
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -4844,15 +4890,51 @@ class TestCacheSchemaMigration(unittest.TestCase):
         self.assertFalse(cache.is_fresh(0, 0, 0, fp))
 
     def test_schema_version_1_treated_as_stale(self):
-        """Cache meta with schema_version < 2 should be treated as stale."""
+        """Cache meta with schema_version < 3 should be treated as stale."""
         import json
         meta_path = os.path.join(self.tmp, TileCache.META_FILE)
         with open(meta_path, 'w') as f:
-            json.dump({"schema_version": 1, "0/0/0": "PNG:85:fp1"}, f)
+            json.dump({"schema_version": 1, "0/0/0/0": "PNG:85:fp1"}, f)
 
         cache = TileCache(self.tmp)
         fp = TileCache.make_fingerprint('PNG', 85, 'fp1')
         self.assertFalse(cache.is_fresh(0, 0, 0, fp))
+
+    def test_schema_version_2_treated_as_stale(self):
+        """v2 caches rendered tiles in the project CRS.  After the EPSG:3857
+        fix (issue #16) those pixels are stale even though their fingerprint
+        still matches, so a v2 cache must be discarded."""
+        import json
+        meta_path = os.path.join(self.tmp, TileCache.META_FILE)
+        with open(meta_path, 'w') as f:
+            json.dump({"schema_version": 2, "0/0/0/0": "PNG:85:fp1"}, f)
+
+        cache = TileCache(self.tmp)
+        fp = TileCache.make_fingerprint('PNG', 85, 'fp1')
+        self.assertFalse(cache.is_fresh(0, 0, 0, fp))
+
+    def test_schema_version_3_is_fresh(self):
+        """A current (v3) cache entry with a matching fingerprint is fresh."""
+        import json
+        fp = TileCache.make_fingerprint('PNG', 85, 'fp1')
+        meta_path = os.path.join(self.tmp, TileCache.META_FILE)
+        with open(meta_path, 'w') as f:
+            json.dump({"schema_version": 3, "0/0/0/0": fp}, f)
+
+        cache = TileCache(self.tmp)
+        self.assertTrue(cache.is_fresh(0, 0, 0, fp))
+
+    def test_save_writes_schema_version_3(self):
+        """Persisted cache metadata must carry the current schema version."""
+        import json
+        cache = TileCache(self.tmp)
+        fp = TileCache.make_fingerprint('PNG', 85, 'fp1')
+        cache.mark(0, 0, 0, fp)  # defer_save=False persists immediately
+
+        meta_path = os.path.join(self.tmp, TileCache.META_FILE)
+        with open(meta_path) as f:
+            data = json.load(f)
+        self.assertEqual(data['schema_version'], 3)
 
 
 class TestRenderSingleTileSourceIndex(unittest.TestCase):
