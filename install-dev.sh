@@ -24,6 +24,8 @@ FILES=(
     comapeo_smp_algorithm.py
     comapeo_smp_generator.py
     comapeo_smp_dialog.py
+    comapeo_smp_merger.py
+    comapeo_smp_merge_algorithm.py
     metadata.txt
 )
 

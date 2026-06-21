@@ -31,6 +31,7 @@ __revision__ = '$Format:%H$'
 
 from qgis.core import QgsProcessingProvider
 from .comapeo_smp_algorithm import ComapeoMapBuilderAlgorithm
+from .comapeo_smp_merge_algorithm import ComapeoSmpMergeAlgorithm
 
 
 class ComapeoMapBuilderProvider(QgsProcessingProvider):
@@ -53,7 +54,7 @@ class ComapeoMapBuilderProvider(QgsProcessingProvider):
         Loads all algorithms belonging to this provider.
         """
         self.addAlgorithm(ComapeoMapBuilderAlgorithm())
-        # add additional algorithms here
+        self.addAlgorithm(ComapeoSmpMergeAlgorithm())
 
     def id(self):
         """

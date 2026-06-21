@@ -50,6 +50,8 @@ produce vector tiles, glyphs, or sprite assets.
 
 ## Usage
 
+### Generate an SMP Map
+
 1. Open QGIS and load the layers you want to include in your SMP file
 2. Style your layers as desired in the QGIS map canvas
 3. Go to `Processing` > `Toolbox` and search for "CoMapeo Map Builder"
@@ -129,6 +131,15 @@ gap automatically.
 The plugin renders visible project layers in QGIS layer-tree order, and uses
 custom layer order when that project setting is enabled.
 
+### Merge Existing SMP Files
+
+Use `Processing` > `Toolbox` > `CoMapeo Map Builder` > `Merge SMP Files` to
+combine two or more existing `.smp` archives into one package. The merge tool
+keeps compatible sources separate unless they share the same bounds and tile
+format with non-overlapping zoom ranges, in which case it combines them into a
+single source. Tile paths are rewritten into the merged package, and the output
+archive includes only `style.json`, `VERSION`, and the merged `s/` tile tree.
+
 ### Tips for Better Results
 
 - Keep the maximum zoom level reasonable (12-16) to avoid generating too many tiles
@@ -184,6 +195,8 @@ make test
 make test-logic
 # or directly:
 PYTHONPATH=. python3 test/test_generator.py
+# merge-specific tests:
+PYTHONPATH=. python3 test/test_generator_merge.py
 
 # Legacy full test suite (requires QGIS Python env + nosetests;
 # exits 0 even when tests fail — do not rely on this in CI):
