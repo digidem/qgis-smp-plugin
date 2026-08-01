@@ -5,6 +5,7 @@
 [general]
 name=CoMapeo Map Builder
 qgisMinimumVersion=3.0
+qgisMaximumVersion=4.99
 description=Generates SMP files for CoMapeo using proper XYZ Web Mercator tiling
 version=0.8.1
 author=Awana Digital
