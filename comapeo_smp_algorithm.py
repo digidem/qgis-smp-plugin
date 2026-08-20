@@ -59,6 +59,14 @@ from .comapeo_smp_generator import (
     WORLD_MAX_ZOOM_WARNING_THRESHOLD,
 )
 
+# QGIS 3 (PyQt5) exposes QgsProcessingParameterNumber.Integer/Double directly
+# on the class; QGIS 4 (PyQt6) may require the scoped
+# QgsProcessingParameterNumber.Type.Integer/Double form. Resolve the enum
+# owner once so parameter definitions work on both bindings.
+_PARAM_NUMBER_TYPE = getattr(
+    QgsProcessingParameterNumber, 'Type', QgsProcessingParameterNumber
+)
+
 
 class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
     """
@@ -231,7 +239,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterNumber(
                 self.MIN_ZOOM,
                 self.tr('Minimum zoom level'),
-                QgsProcessingParameterNumber.Integer,
+                _PARAM_NUMBER_TYPE.Integer,
                 defaultValue=8,
                 optional=False,
                 minValue=0,
@@ -244,7 +252,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterNumber(
                 self.MAX_ZOOM,
                 self.tr('Maximum zoom level'),
-                QgsProcessingParameterNumber.Integer,
+                _PARAM_NUMBER_TYPE.Integer,
                 defaultValue=14,
                 optional=False,
                 minValue=0,
@@ -267,7 +275,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
         jpeg_quality_param = QgsProcessingParameterNumber(
             self.JPEG_QUALITY,
             self.tr('JPEG/WebP quality (1-100, used when format is JPG or WEBP)'),
-            QgsProcessingParameterNumber.Integer,
+            _PARAM_NUMBER_TYPE.Integer,
             defaultValue=85,
             optional=True,
             minValue=1,
@@ -288,7 +296,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterNumber(
                 self.WORLD_MAX_ZOOM,
                 self.tr('World maximum zoom'),
-                QgsProcessingParameterNumber.Integer,
+                _PARAM_NUMBER_TYPE.Integer,
                 defaultValue=3,
                 optional=True,
                 minValue=0,
@@ -328,7 +336,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                 QgsProcessingParameterNumber(
                     self.REGION_MIN_ZOOM,
                     self.tr('Region minimum zoom level'),
-                    QgsProcessingParameterNumber.Integer,
+                    _PARAM_NUMBER_TYPE.Integer,
                     defaultValue=4,
                     optional=True,
                     minValue=0,
@@ -344,7 +352,7 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
                 QgsProcessingParameterNumber(
                     self.REGION_MAX_ZOOM,
                     self.tr('Region maximum zoom level'),
-                    QgsProcessingParameterNumber.Integer,
+                    _PARAM_NUMBER_TYPE.Integer,
                     defaultValue=7,
                     optional=True,
                     minValue=0,
@@ -384,8 +392,19 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
         if project_path:
             default_dir = os.path.dirname(project_path)
         else:
+            # QGIS 3 (PyQt5) uses the flat enum (QStandardPaths.DocumentsLocation)
+            # while QGIS 4 (PyQt6) requires the scoped form. Resolve the enum
+            # owner first (getattr on a plain attribute access still raises if
+            # 'StandardLocation' doesn't exist on this binding) before looking
+            # up 'DocumentsLocation' on it.
+            standard_location_owner = getattr(
+                QStandardPaths, 'StandardLocation', QStandardPaths
+            )
+            documents_location = getattr(
+                standard_location_owner, 'DocumentsLocation', None
+            )
             default_dir = QStandardPaths.writableLocation(
-                QStandardPaths.DocumentsLocation
+                documents_location
             )
         default_output = os.path.join(default_dir, base_name + '.smp')
 

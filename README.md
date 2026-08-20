@@ -162,7 +162,7 @@ the three ranges remain strictly ordered.
 
 ## Requirements
 
-- QGIS 3.0 or later
+- QGIS 3.0 up to 4.99 (see `qgisMaximumVersion` in `metadata.txt`)
 
 ## Development
 

@@ -26,9 +26,20 @@ __copyright__ = '(C) 2025 by Awana Digital'
 
 from qgis.PyQt.QtWidgets import QCheckBox, QComboBox, QWidget
 
-from processing.gui.AlgorithmDialog import AlgorithmDialog
 from processing.gui.ParametersPanel import ParametersPanel
 from processing.gui.wrappers import WidgetWrapper
+
+# QGIS <= 3 ships the algorithm dialog as `processing.gui.AlgorithmDialog`.
+# QGIS >= 4 refactored it into `processing.gui.algorithm_widget.AlgorithmWidget`
+# (a QgsProcessingAlgorithmWidgetBase subclass).  Both expose a
+# `getParametersPanel(alg, parent)` hook, so we can branch on the QGIS version
+# at import time and subclass whichever is present in the running runtime.
+from qgis.core import Qgis as _Qgis
+
+if _Qgis.QGIS_VERSION_INT >= 40000:  # QGIS 4
+    from processing.gui.algorithm_widget import AlgorithmWidget as _BaseAlgorithmDialog
+else:  # QGIS 3
+    from processing.gui.AlgorithmDialog import AlgorithmDialog as _BaseAlgorithmDialog
 
 
 # ---------------------------------------------------------------------------
@@ -43,10 +54,12 @@ QUALITY_PARAMS = {'JPEG_QUALITY'}
 _QUALITY_FORMATS = {1, 2}  # 1=JPG, 2=WEBP
 
 
-class SmpAlgorithmDialog(AlgorithmDialog):
+class SmpAlgorithmDialog(_BaseAlgorithmDialog):
     """Custom algorithm dialog that uses :class:`SmpParametersPanel`."""
 
     def __init__(self, alg, parent=None):
+        # QGIS 4's AlgorithmWidget and QGIS 3's AlgorithmDialog both accept
+        # ``parent`` as a keyword argument.
         super().__init__(alg, parent=parent)
 
     def getParametersPanel(self, alg, parent):
@@ -65,11 +78,11 @@ class SmpParametersPanel(ParametersPanel):
     * ``JPEG_QUALITY`` — visible when ``TILE_FORMAT`` is JPG or WEBP
     """
 
-    def __init__(self, parent, alg):
+    def __init__(self, parent, alg, *args, **kwargs):
         # Maps parameter name → list of QWidget that form its row
         # (label widget, value widget)
         self._param_widgets = {}
-        super().__init__(parent, alg)
+        super().__init__(parent, alg, *args, **kwargs)
         self._connect_visibility_signals()
         self._update_all_visibility()
 
