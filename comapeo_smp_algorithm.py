@@ -384,8 +384,15 @@ class ComapeoMapBuilderAlgorithm(QgsProcessingAlgorithm):
         if project_path:
             default_dir = os.path.dirname(project_path)
         else:
+            # QGIS 3 (PyQt5) uses the flat enum (QStandardPaths.DocumentsLocation)
+            # while QGIS 4 (PyQt6) requires the scoped form. Resolve whichever the
+            # current Qt binding exposes so the plugin keeps working on both.
+            documents_location = getattr(
+                QStandardPaths.StandardLocation, 'DocumentsLocation',
+                getattr(QStandardPaths, 'DocumentsLocation', None)
+            )
             default_dir = QStandardPaths.writableLocation(
-                QStandardPaths.DocumentsLocation
+                documents_location
             )
         default_output = os.path.join(default_dir, base_name + '.smp')
 
