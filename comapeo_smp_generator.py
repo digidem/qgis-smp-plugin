@@ -27,6 +27,11 @@ from qgis.core import (
 from qgis.PyQt.QtCore import QSize
 from qgis.PyQt.QtGui import QImage, QPainter, QImageWriter
 
+# QGIS 3 (PyQt5) exposes QImage.Format_* directly on QImage; QGIS 4 (PyQt6)
+# requires the scoped QImage.Format.Format_* form. Resolve the enum owner
+# once so tile rendering works on both bindings.
+_QIMAGE_FORMAT = getattr(QImage, 'Format', QImage)
+
 # Warn if estimated tile count exceeds this threshold
 TILE_COUNT_WARNING_THRESHOLD = 5000
 # Warn (non-blocking) when world coverage is requested above this zoom because
@@ -1595,11 +1600,11 @@ class SMPGenerator:
 
         tile_size = 256
         if tile_format == self.TILE_FORMAT_JPG:
-            img = QImage(tile_size, tile_size, QImage.Format.Format_RGB32)
+            img = QImage(tile_size, tile_size, _QIMAGE_FORMAT.Format_RGB32)
             img.fill(0xFFFFFFFF)
         else:
             # PNG and WebP both support transparency
-            img = QImage(tile_size, tile_size, QImage.Format.Format_ARGB32)
+            img = QImage(tile_size, tile_size, _QIMAGE_FORMAT.Format_ARGB32)
             img.fill(0)
 
         painter = QPainter(img)
