@@ -7,7 +7,7 @@ name=CoMapeo Map Builder
 qgisMinimumVersion=3.0
 qgisMaximumVersion=4.99
 description=Generates SMP files for CoMapeo using proper XYZ Web Mercator tiling
-version=0.8.1
+version=0.9.0
 author=Awana Digital
 email=luandro@awana.digital
 
@@ -21,6 +21,11 @@ repository=https://github.com/digidem/qgis-smp-plugin
 
 hasProcessingProvider=yes
 changelog=
+    0.9.0 - QGIS 4 / PyQt6 compatibility
+    * Support QGIS 4 (PyQt6) while keeping QGIS 3 (PyQt5) working, up to qgisMaximumVersion=4.99
+    * Select the correct Processing dialog base class (AlgorithmDialog vs AlgorithmWidget) at runtime by QGIS version
+    * Resolve Qt/QGIS enums (QImage.Format, QStandardPaths.StandardLocation, Qgis.MessageLevel, QgsProcessingParameterNumber.Type) via safe owner lookup so both flat and scoped enum bindings work
+    * Update README to document the supported QGIS version range
     0.8.1 - Fix blurry tiles, fixed world/region/local source model, MIT license
     * Add "tileSize": 256 to style.json sources so MapLibre stops upscaling tiles (fixes blur and clipped labels)
     * Render tiles in EPSG:3857 (Web Mercator) instead of the project CRS to remove projection distortion and misalignment
