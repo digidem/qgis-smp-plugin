@@ -32,6 +32,11 @@ from qgis.PyQt.QtGui import QImage, QPainter, QImageWriter
 # once so tile rendering works on both bindings.
 _QIMAGE_FORMAT = getattr(QImage, 'Format', QImage)
 
+# QGIS 3 exposes Qgis.Info/Warning/Critical directly on Qgis; newer QGIS
+# versions may require the scoped Qgis.MessageLevel.Info/etc form. Resolve
+# the enum owner once so logging works on both.
+_QGIS_MESSAGE_LEVEL = getattr(Qgis, 'MessageLevel', Qgis)
+
 # Warn if estimated tile count exceeds this threshold
 TILE_COUNT_WARNING_THRESHOLD = 5000
 # Warn (non-blocking) when world coverage is requested above this zoom because
@@ -323,13 +328,15 @@ class SMPGenerator:
         self._wgs84_crs = QgsCoordinateReferenceSystem("EPSG:4326")
         self._web_mercator_crs = QgsCoordinateReferenceSystem("EPSG:3857")
 
-    def log(self, message, level=Qgis.Info):
+    def log(self, message, level=None):
         """
         Log a message
 
         :param message: Message to log
         :param level: Log level
         """
+        if level is None:
+            level = _QGIS_MESSAGE_LEVEL.Info
         if self.feedback:
             self.feedback.pushInfo(message)
         QgsMessageLog.logMessage(message, 'CoMapeo SMP Generator', level)
@@ -1204,11 +1211,11 @@ class SMPGenerator:
         self.log(f"Estimated output size: {estimated_mb:.1f} MB")
         self.log(f"Estimated world pyramid coverage: {export_plan['world_pct']:.2f}%")
         if count_warning:
-            self.log(count_warning, Qgis.Warning)
+            self.log(count_warning, _QGIS_MESSAGE_LEVEL.Warning)
 
         extent_warning = self.validate_extent_size(extent, min_zoom, max_zoom)
         if extent_warning:
-            self.log(extent_warning, Qgis.Warning)
+            self.log(extent_warning, _QGIS_MESSAGE_LEVEL.Warning)
 
         self.validate_disk_space(output_path, tile_count, tile_format)
 
@@ -1289,7 +1296,7 @@ class SMPGenerator:
             return output_path  # type: ignore[return-value]
 
         except Exception as e:
-            self.log(f"Error generating SMP file: {str(e)}", Qgis.Critical)
+            self.log(f"Error generating SMP file: {str(e)}", _QGIS_MESSAGE_LEVEL.Critical)
             raise
         finally:
             # Always clean up temporary directory
